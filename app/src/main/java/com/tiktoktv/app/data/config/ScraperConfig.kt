@@ -3,14 +3,14 @@ package com.tiktoktv.app.data.config
 import com.tiktoktv.app.data.model.Category
 
 /**
- * Centralized scraping configuration.
- * Update URLs, headers, JSON keys, and Jsoup selectors here if the upstream site structure changes.
+ * Centralized scraping & API configuration.
+ * Update URLs, headers, JSON keys, and Jsoup selectors here if upstream structures change.
  */
 object ScraperConfig {
-
     // Base URLs
     const val TIKTOK_WEB_BASE = "https://www.tiktok.com"
     const val TIKTOK_EXPLORE_URL = "$TIKTOK_WEB_BASE/explore"
+    const val TIKTOK_LIVE_URL = "$TIKTOK_WEB_BASE/live"
     const val TIKTOK_TAG_URL_TEMPLATE = "$TIKTOK_WEB_BASE/tag/%s"
     const val TIKTOK_DISCOVER_URL_TEMPLATE = "$TIKTOK_WEB_BASE/discover/%s"
     const val TIKTOK_PROFILE_URL_TEMPLATE = "$TIKTOK_WEB_BASE/@%s"
@@ -18,23 +18,34 @@ object ScraperConfig {
 
     // Direct TikTok Web JSON Endpoints (session cookies warmed from TIKTOK_EXPLORE_URL)
     const val TIKTOK_EXPLORE_API = "$TIKTOK_WEB_BASE/api/explore/item_list/"
+    const val TIKTOK_POST_ITEM_LIST = "$TIKTOK_WEB_BASE/api/post/item_list/"
     const val TIKTOK_COMMENT_API = "$TIKTOK_WEB_BASE/api/comment/list/"
 
-    // Public JSON Scraper Mirror Endpoints (secondary/search/profile endpoints)
+    // Live Autocomplete Endpoint
+    const val API_SEARCH_SUGGEST = "https://suggestqueries.google.com/complete/search"
+
+    // Public JSON Mirror Endpoints
     const val PUBLIC_API_BASE = "https://www.tikwm.com/api"
     const val API_TRENDING_FEED = "$PUBLIC_API_BASE/feed/list"
     const val API_SEARCH_FEED = "$PUBLIC_API_BASE/feed/search"
+    const val API_USER_SEARCH = "$PUBLIC_API_BASE/user/search"
     const val API_USER_POSTS = "$PUBLIC_API_BASE/user/posts"
     const val API_USER_INFO = "$PUBLIC_API_BASE/user/info"
     const val API_COMMENT_LIST = "$PUBLIC_API_BASE/comment/list"
 
     // Network & Cache Settings
-    const val CONNECT_TIMEOUT_SEC = 15L
-    const val READ_TIMEOUT_SEC = 20L
-    const val HTTP_DISK_CACHE_BYTES = 100L * 1024L * 1024L // 100 MB
-    const val MEMORY_CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
-    const val DISK_CACHE_TTL_MS = 30 * 60 * 1000L // 30 minutes
-    const val DEFAULT_PAGE_SIZE = 15
+    const val CONNECT_TIMEOUT_SEC = 12L
+    const val READ_TIMEOUT_SEC = 18L
+    const val HTTP_DISK_CACHE_BYTES = 80L * 1024L * 1024L // 80 MB
+    const val MEMORY_CACHE_TTL_MS = 3 * 60 * 1000L // 3 minutes (never blocks fresh launch)
+    const val DISK_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
+    const val BLOCKED_ENDPOINT_COOLDOWN_MS = 5 * 60 * 1000L // 5 min circuit breaker for CF-blocked routes
+    const val DEFAULT_PAGE_SIZE = 18
+
+    // Region pool rotated on every launch/refresh for fresh content
+    val TRENDING_REGION_POOL: List<String> = listOf(
+        "US", "GB", "CA", "AU", "SG", "DE", "FR", "BR", "JP", "ID"
+    )
 
     // HTTP Headers
     const val HEADER_USER_AGENT_KEY = "User-Agent"
@@ -53,7 +64,7 @@ object ScraperConfig {
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     const val HEADER_ACCEPT_JSON = "application/json, text/plain, */*"
 
-    // Jsoup HTML Selectors (for direct web page scraping)
+    // Jsoup HTML Selectors
     const val SELECTOR_UNIVERSAL_DATA_SCRIPT = "script#__UNIVERSAL_DATA_FOR_REHYDRATION__"
     const val SELECTOR_API_DATA_SCRIPT = "script#api-data"
     const val SELECTOR_SIGI_STATE_SCRIPT = "script#SIGI_STATE"
@@ -71,7 +82,7 @@ object ScraperConfig {
     const val SELECTOR_LIKES_COUNT = "[data-e2e=likes-count]"
     const val SELECTOR_VIDEO_CARD_LINKS = "a[href*=/video/]"
 
-    // Embedded JSON Keys (TikTok Hydration State)
+    // Embedded JSON Keys
     const val JSON_KEY_DEFAULT_SCOPE = "__DEFAULT_SCOPE__"
     const val JSON_KEY_ITEM_MODULE = "ItemModule"
     const val JSON_KEY_USER_MODULE = "UserModule"
@@ -81,7 +92,7 @@ object ScraperConfig {
     const val JSON_KEY_WEBAPP_EXPLORE = "webapp.explore-detail"
     const val JSON_KEY_USER_INFO = "userInfo"
 
-    // TikTok Explore categoryType IDs (from webapp.explore.categoryList)
+    // TikTok Explore categoryType IDs
     val EXPLORE_CATEGORY_TYPE_MAP: Map<String, Int> = mapOf(
         "for_you" to 120,
         "following" to 119,
@@ -98,7 +109,6 @@ object ScraperConfig {
         "dance" to 119
     )
 
-    // Default TV Categories matching the TikTok TV Browse Bar
     val DEFAULT_CATEGORIES: List<Category> = listOf(
         Category(id = "for_you", label = "For You", slug = "foryou", hashtag = "fyp"),
         Category(id = "following", label = "Following", slug = "following", hashtag = "trending"),
