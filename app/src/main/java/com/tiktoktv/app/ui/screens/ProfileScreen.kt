@@ -62,7 +62,6 @@ import coil.compose.AsyncImage
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.ui.ProfileTab
 import com.tiktoktv.app.ui.UiState
-import com.tiktoktv.app.ui.components.ErrorScreen
 import com.tiktoktv.app.ui.components.FocusPillButton
 import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.util.formatCompactCount
@@ -73,6 +72,7 @@ fun ProfileScreen(
     onSelectTab: (ProfileTab) -> Unit,
     onPlayVideo: (List<VideoItem>, Int) -> Unit,
     onRetryProfile: () -> Unit,
+    onLoadMoreProfile: () -> Unit,
     onToggleAutoScroll: () -> Unit,
     onToggleAutoplay: () -> Unit,
     onCycleQuality: () -> Unit,
@@ -81,15 +81,16 @@ fun ProfileScreen(
 ) {
     val profileSidebarFocus = remember { FocusRequester() }
     val likedSidebarFocus = remember { FocusRequester() }
+    val historySidebarFocus = remember { FocusRequester() }
     val settingsSidebarFocus = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) {
-        val target = when (uiState.profileTab) {
-            ProfileTab.PROFILE -> profileSidebarFocus
-            ProfileTab.LIKED_VIDEOS -> likedSidebarFocus
-            ProfileTab.SETTINGS -> settingsSidebarFocus
+    LaunchedEffect(uiState.profileTab) {
+        when (uiState.profileTab) {
+            ProfileTab.PROFILE -> runCatching { profileSidebarFocus.requestFocus() }
+            ProfileTab.LIKED_VIDEOS -> runCatching { likedSidebarFocus.requestFocus() }
+            ProfileTab.HISTORY -> runCatching { historySidebarFocus.requestFocus() }
+            ProfileTab.SETTINGS -> runCatching { settingsSidebarFocus.requestFocus() }
         }
-        runCatching { target.requestFocus() }
     }
 
     Row(
@@ -107,14 +108,15 @@ fun ProfileScreen(
     ) {
         Column(
             modifier = Modifier
-                .width(230.dp)
+                .width(240.dp)
                 .fillMaxHeight()
-                .padding(horizontal = 24.dp, vertical = 48.dp),
+                .background(TikTokColors.SurfaceDark)
+                .padding(horizontal = 20.dp, vertical = 36.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SidebarNavItem(
-                    label = "Profile",
+                    label = if (uiState.isOwnProfile) "Profile" else "Creator Videos",
                     selected = uiState.profileTab == ProfileTab.PROFILE,
                     focusRequester = profileSidebarFocus,
                     onSelect = { onSelectTab(ProfileTab.PROFILE) }
@@ -125,8 +127,15 @@ fun ProfileScreen(
                     focusRequester = likedSidebarFocus,
                     onSelect = { onSelectTab(ProfileTab.LIKED_VIDEOS) }
                 )
+                if (uiState.isOwnProfile) {
+                    SidebarNavItem(
+                        label = "Watch history",
+                        selected = uiState.profileTab == ProfileTab.HISTORY,
+                        focusRequester = historySidebarFocus,
+                        onSelect = { onSelectTab(ProfileTab.HISTORY) }
+                    )
+                }
             }
-
             SidebarNavItem(
                 label = "Settings",
                 selected = uiState.profileTab == ProfileTab.SETTINGS,
@@ -145,7 +154,7 @@ fun ProfileScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .padding(horizontal = 42.dp, vertical = 36.dp)
+                .padding(horizontal = 42.dp, vertical = 32.dp)
         ) {
             when (uiState.profileTab) {
                 ProfileTab.SETTINGS -> {
@@ -166,13 +175,13 @@ fun ProfileScreen(
                             fontSize = 28.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = "${uiState.likedVideos.size} saved locally",
                             color = TikTokColors.TextSecondary,
                             fontSize = 15.sp
                         )
-                        Spacer(modifier = Modifier.height(22.dp))
+                        Spacer(modifier = Modifier.height(20.dp))
                         VideoFiveColumnGrid(
                             videos = uiState.likedVideos,
                             emptyText = "Videos you like while watching will appear here.",
@@ -180,135 +189,153 @@ fun ProfileScreen(
                         )
                     }
                 }
+                ProfileTab.HISTORY -> {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Text(
+                            text = "Watch history",
+                            color = TikTokColors.White,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "${uiState.watchHistory.size} recently watched videos",
+                            color = TikTokColors.TextSecondary,
+                            fontSize = 15.sp
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        VideoFiveColumnGrid(
+                            videos = uiState.watchHistory,
+                            emptyText = "Your recently watched videos will appear here.",
+                            onVideoClick = { idx -> onPlayVideo(uiState.watchHistory, idx) }
+                        )
+                    }
+                }
                 ProfileTab.PROFILE -> {
-                    when {
-                        uiState.isProfileLoading -> {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(color = TikTokColors.Pink)
-                            }
+                    if (uiState.isProfileLoading) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = TikTokColors.Pink)
                         }
-                        uiState.profileError != null && uiState.profileVideos.isEmpty() && uiState.profileAuthor == null -> {
-                            ErrorScreen(
-                                message = uiState.profileError,
-                                onRetry = onRetryProfile
-                            )
-                        }
-                        else -> {
-                            val author = uiState.profileAuthor
-                            Column(modifier = Modifier.fillMaxSize()) {
-                                if (author != null) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth()
+                    } else {
+                        val author = uiState.profileAuthor
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (author != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(22.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(88.dp)
+                                            .clip(CircleShape)
+                                            .background(TikTokColors.SurfaceElevated),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(132.dp)
-                                                .clip(CircleShape)
-                                                .background(TikTokColors.SurfaceElevated),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (author.avatarUrl.isNotBlank()) {
-                                                AsyncImage(
-                                                    model = author.avatarUrl,
-                                                    contentDescription = author.username,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                            } else {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Person,
-                                                    contentDescription = null,
-                                                    tint = TikTokColors.TextSecondary,
-                                                    modifier = Modifier.size(58.dp)
-                                                )
-                                            }
+                                        if (author.avatarUrl.isNotBlank()) {
+                                            AsyncImage(
+                                                model = author.avatarUrl,
+                                                contentDescription = author.displayName,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Filled.Person,
+                                                contentDescription = null,
+                                                tint = TikTokColors.TextMuted,
+                                                modifier = Modifier.size(40.dp)
+                                            )
                                         }
-
-                                        Spacer(modifier = Modifier.width(28.dp))
-
-                                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    }
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(
+                                            text = author.displayName,
+                                            color = TikTokColors.White,
+                                            fontSize = 26.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "@${author.username}",
+                                            color = TikTokColors.TextSecondary,
+                                            fontSize = 15.sp
+                                        )
+                                        if (author.bio.isNotBlank()) {
                                             Text(
-                                                text = author.username,
-                                                color = TikTokColors.White,
-                                                fontSize = 30.sp,
-                                                fontWeight = FontWeight.ExtraBold
+                                                text = author.bio,
+                                                color = TikTokColors.TextSecondary,
+                                                fontSize = 14.sp,
+                                                maxLines = 2
                                             )
-                                            Text(
-                                                text = author.displayName,
-                                                color = TikTokColors.White,
-                                                fontSize = 18.sp,
-                                                fontWeight = FontWeight.SemiBold
-                                            )
-                                            if (author.bio.isNotBlank()) {
-                                                Text(
-                                                    text = author.bio,
-                                                    color = TikTokColors.TextSecondary,
-                                                    fontSize = 14.sp,
-                                                    maxLines = 2
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                                                ProfileStatText(
-                                                    count = author.followingCount,
-                                                    label = "Following"
-                                                )
-                                                ProfileStatText(
-                                                    count = author.followersCount,
-                                                    label = "Followers"
-                                                )
-                                                ProfileStatText(
-                                                    count = author.likesCount,
-                                                    label = "Likes"
-                                                )
-                                            }
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                            ProfileStatText(count = author.followingCount, label = "Following")
+                                            ProfileStatText(count = author.followersCount, label = "Followers")
+                                            ProfileStatText(count = author.likesCount, label = "Likes")
                                         }
                                     }
                                 }
+                            }
 
-                                Spacer(modifier = Modifier.height(28.dp))
+                            Spacer(modifier = Modifier.height(22.dp))
 
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text(
-                                    text = if (uiState.isOwnProfile) "Bookmarked Videos" else "Videos",
+                                    text = if (uiState.isOwnProfile) {
+                                        "Bookmarked Videos (${uiState.profileVideos.size})"
+                                    } else {
+                                        "Video History (${uiState.profileVideos.size})"
+                                    },
                                     color = TikTokColors.White,
                                     fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold
                                 )
-
-                                Spacer(modifier = Modifier.height(14.dp))
-
-                                if (uiState.profileError != null && uiState.profileVideos.isEmpty()) {
-                                    Column(
-                                        modifier = Modifier.fillMaxSize(),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center
-                                    ) {
-                                        Text(
-                                            text = uiState.profileError,
-                                            color = TikTokColors.TextSecondary,
-                                            fontSize = 16.sp
-                                        )
-                                        Spacer(modifier = Modifier.height(18.dp))
-                                        FocusPillButton(
-                                            label = "Retry",
-                                            onClick = onRetryProfile
-                                        )
-                                    }
-                                } else {
-                                    VideoFiveColumnGrid(
-                                        videos = uiState.profileVideos,
-                                        emptyText = if (uiState.isOwnProfile) {
-                                            "Bookmarked videos will appear here."
-                                        } else {
-                                            "No public videos found for this creator."
-                                        },
-                                        onVideoClick = { idx -> onPlayVideo(uiState.profileVideos, idx) }
+                                if (uiState.profileHasMore && !uiState.isProfileLoadingMore) {
+                                    FocusPillButton(
+                                        label = "Load More Videos",
+                                        onClick = onLoadMoreProfile
+                                    )
+                                } else if (uiState.isProfileLoadingMore) {
+                                    CircularProgressIndicator(
+                                        color = TikTokColors.Pink,
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            if (uiState.profileError != null && uiState.profileVideos.isEmpty()) {
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = uiState.profileError,
+                                        color = TikTokColors.TextSecondary,
+                                        fontSize = 16.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(18.dp))
+                                    FocusPillButton(
+                                        label = "Retry",
+                                        onClick = onRetryProfile
+                                    )
+                                }
+                            } else {
+                                VideoFiveColumnGrid(
+                                    videos = uiState.profileVideos,
+                                    emptyText = if (uiState.isOwnProfile) {
+                                        "Bookmarked videos will appear here."
+                                    } else {
+                                        "No public videos found for this creator yet."
+                                    },
+                                    onVideoClick = { idx -> onPlayVideo(uiState.profileVideos, idx) },
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
                         }
                     }
@@ -327,7 +354,6 @@ private fun SidebarNavItem(
 ) {
     var isFocused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (isFocused) 1.05f else 1f, label = "sidebarScale")
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -347,14 +373,6 @@ private fun SidebarNavItem(
             }
             .focusable()
             .clickable { onSelect() }
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown &&
-                    (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
-                ) {
-                    onSelect()
-                    true
-                } else false
-            }
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Text(
@@ -394,19 +412,11 @@ fun VideoFiveColumnGrid(
     modifier: Modifier = Modifier
 ) {
     if (videos.isEmpty()) {
-        Box(
-            modifier = modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = emptyText,
-                color = TikTokColors.TextSecondary,
-                fontSize = 16.sp
-            )
+        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(text = emptyText, color = TikTokColors.TextSecondary, fontSize = 16.sp)
         }
         return
     }
-
     LazyVerticalGrid(
         columns = GridCells.Fixed(5),
         modifier = modifier.fillMaxSize(),
@@ -415,22 +425,15 @@ fun VideoFiveColumnGrid(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         itemsIndexed(videos, key = { idx, item -> "${item.id}_$idx" }) { index, video ->
-            VideoGridThumbnailCard(
-                video = video,
-                onClick = { onVideoClick(index) }
-            )
+            VideoGridThumbnailCard(video = video, onClick = { onVideoClick(index) })
         }
     }
 }
 
 @Composable
-private fun VideoGridThumbnailCard(
-    video: VideoItem,
-    onClick: () -> Unit
-) {
+private fun VideoGridThumbnailCard(video: VideoItem, onClick: () -> Unit) {
     var isFocused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (isFocused) 1.07f else 1f, label = "gridCardScale")
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -446,14 +449,6 @@ private fun VideoGridThumbnailCard(
             .onFocusChanged { isFocused = it.isFocused }
             .focusable()
             .clickable { onClick() }
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown &&
-                    (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
-                ) {
-                    onClick()
-                    true
-                } else false
-            }
     ) {
         if (video.coverUrl.isNotBlank()) {
             AsyncImage(
@@ -463,7 +458,6 @@ private fun VideoGridThumbnailCard(
                 modifier = Modifier.fillMaxSize()
             )
         }
-
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -473,11 +467,8 @@ private fun VideoGridThumbnailCard(
                     )
                 )
         )
-
         Row(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(8.dp),
+            modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
