@@ -37,12 +37,10 @@ import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.ui.theme.TikTokTvTheme
 
 class MainActivity : ComponentActivity() {
-
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             TikTokTvTheme {
                 val uiState by viewModel.uiState.collectAsState()
@@ -52,119 +50,91 @@ class MainActivity : ComponentActivity() {
                         uiState.overlayMode != FeedOverlayMode.NONE
                 ) {
                     when {
-                        uiState.currentScreen == AppScreen.CATEGORY_PICKER -> {
+                        uiState.currentScreen == AppScreen.CATEGORY_PICKER ->
                             viewModel.closeCategoryScreenWithoutChange()
-                        }
                         uiState.currentScreen != AppScreen.HOME_FEED &&
-                            uiState.currentScreen != AppScreen.SPLASH -> {
+                            uiState.currentScreen != AppScreen.SPLASH ->
                             viewModel.navigateBackToFeed()
-                        }
                         uiState.overlayMode == FeedOverlayMode.COMMENTS ||
-                            uiState.overlayMode == FeedOverlayMode.MORE_MENU -> {
+                            uiState.overlayMode == FeedOverlayMode.MORE_MENU ->
                             viewModel.setOverlayMode(FeedOverlayMode.BOTTOM_BAR)
-                        }
-                        uiState.overlayMode == FeedOverlayMode.LOGIN_MODAL -> {
+                        uiState.overlayMode == FeedOverlayMode.LOGIN_MODAL ->
                             viewModel.setOverlayMode(FeedOverlayMode.TOP_BAR)
-                        }
-                        uiState.overlayMode != FeedOverlayMode.NONE -> {
+                        uiState.overlayMode != FeedOverlayMode.NONE ->
                             viewModel.setOverlayMode(FeedOverlayMode.NONE)
-                        }
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(TikTokColors.Black)
-                ) {
+                Box(modifier = Modifier.fillMaxSize().background(TikTokColors.Black)) {
                     when (uiState.currentScreen) {
-                        AppScreen.SPLASH -> {
-                            SplashScreen(onFinished = { viewModel.finishSplash() })
-                        }
-
-                        AppScreen.HOME_FEED -> {
-                            HomeFeedScreen(
-                                uiState = uiState,
-                                playerManager = viewModel.playerManager,
-                                onNextVideo = { viewModel.nextVideo() },
-                                onPreviousVideo = { viewModel.previousVideo() },
-                                onTogglePlayPause = { viewModel.togglePlayPause() },
-                                onSetOverlayMode = { mode -> viewModel.setOverlayMode(mode) },
-                                onOpenCategories = { viewModel.openCategoryScreen() },
-                                onRefreshForYou = {
-                                    viewModel.selectCategory(ScraperConfig.DEFAULT_CATEGORIES.first())
-                                },
-                                onOpenSearch = { viewModel.openSearch() },
-                                onOpenOwnProfile = { viewModel.openOwnProfile() },
-                                onOpenAuthorProfile = {
-                                    uiState.currentVideo?.author?.let { viewModel.openAuthorProfile(it) }
-                                },
-                                onToggleLike = { viewModel.toggleLikeCurrentVideo() },
-                                onOpenComments = { viewModel.openComments() },
-                                onToggleCommentLike = { id -> viewModel.toggleCommentLike(id) },
-                                onToggleSave = { viewModel.toggleSaveCurrentVideo() },
-                                onCopyLink = { viewModel.copyCurrentVideoLink() },
-                                onNotInterested = { viewModel.markNotInterestedCurrentVideo() },
-                                onOpenSettings = { viewModel.openSettingsScreen() },
-                                onRetryFeed = { viewModel.retryFeed() }
-                            )
-                        }
-
-                        AppScreen.CATEGORY_PICKER -> {
-                            CategoryScreen(
-                                categories = uiState.categories,
-                                activeCategory = uiState.activeCategory,
-                                fallbackBackdropUrl = uiState.currentVideo?.coverUrl.orEmpty(),
-                                onSelectCategory = { cat -> viewModel.selectCategory(cat) },
-                                onDismiss = { viewModel.closeCategoryScreenWithoutChange() }
-                            )
-                        }
-
-                        AppScreen.PROFILE -> {
-                            ProfileScreen(
-                                uiState = uiState,
-                                onSelectTab = { tab -> viewModel.selectProfileTab(tab) },
-                                onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
-                                onRetryProfile = { viewModel.retryProfile() },
-                                onToggleAutoScroll = { viewModel.toggleAutoScroll() },
-                                onToggleAutoplay = { viewModel.toggleAutoplay() },
-                                onCycleQuality = { viewModel.cycleVideoQuality() },
-                                onClearCache = { viewModel.clearAllCache() },
-                                onBack = { viewModel.navigateBackToFeed() }
-                            )
-                        }
-
-                        AppScreen.SEARCH -> {
-                            SearchScreen(
-                                uiState = uiState,
-                                onQueryChange = { q -> viewModel.updateSearchQuery(q) },
-                                onSubmitSearch = { q -> viewModel.submitSearch(q) },
-                                onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
-                                onBack = { viewModel.navigateBackToFeed() }
-                            )
-                        }
-
-                        AppScreen.SETTINGS -> {
-                            SettingsScreen(
-                                settings = uiState.settings,
-                                cacheSizeText = uiState.cacheSizeText,
-                                onToggleAutoScroll = { viewModel.toggleAutoScroll() },
-                                onToggleAutoplay = { viewModel.toggleAutoplay() },
-                                onCycleQuality = { viewModel.cycleVideoQuality() },
-                                onClearCache = { viewModel.clearAllCache() },
-                                onBack = { viewModel.navigateBackToFeed() }
-                            )
-                        }
+                        AppScreen.SPLASH -> SplashScreen(onFinished = { viewModel.finishSplash() })
+                        AppScreen.HOME_FEED -> HomeFeedScreen(
+                            uiState = uiState,
+                            playerManager = viewModel.playerManager,
+                            onNextVideo = { viewModel.nextVideo() },
+                            onPreviousVideo = { viewModel.previousVideo() },
+                            onTogglePlayPause = { viewModel.togglePlayPause() },
+                            onSetOverlayMode = { mode -> viewModel.setOverlayMode(mode) },
+                            onOpenCategories = { viewModel.openCategoryScreen() },
+                            onRefreshForYou = { viewModel.selectCategory(ScraperConfig.DEFAULT_CATEGORIES.first()) },
+                            onOpenSearch = { viewModel.openSearch() },
+                            onOpenOwnProfile = { viewModel.openOwnProfile() },
+                            onOpenAuthorProfile = {
+                                uiState.currentVideo?.author?.let { viewModel.openAuthorProfile(it) }
+                            },
+                            onToggleLike = { viewModel.toggleLikeCurrentVideo() },
+                            onOpenComments = { viewModel.openComments() },
+                            onToggleCommentLike = { id -> viewModel.toggleCommentLike(id) },
+                            onToggleSave = { viewModel.toggleSaveCurrentVideo() },
+                            onCopyLink = { viewModel.copyCurrentVideoLink() },
+                            onNotInterested = { viewModel.markNotInterestedCurrentVideo() },
+                            onOpenSettings = { viewModel.openSettingsScreen() },
+                            onRetryFeed = { viewModel.retryFeed() }
+                        )
+                        AppScreen.CATEGORY_PICKER -> CategoryScreen(
+                            categories = uiState.categories,
+                            activeCategory = uiState.activeCategory,
+                            fallbackBackdropUrl = uiState.currentVideo?.coverUrl.orEmpty(),
+                            onSelectCategory = { cat -> viewModel.selectCategory(cat) },
+                            onDismiss = { viewModel.closeCategoryScreenWithoutChange() }
+                        )
+                        AppScreen.PROFILE -> ProfileScreen(
+                            uiState = uiState,
+                            onSelectTab = { tab -> viewModel.selectProfileTab(tab) },
+                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
+                            onRetryProfile = { viewModel.retryProfile() },
+                            onLoadMoreProfile = { viewModel.loadMoreProfileVideos() },
+                            onToggleAutoScroll = { viewModel.toggleAutoScroll() },
+                            onToggleAutoplay = { viewModel.toggleAutoplay() },
+                            onCycleQuality = { viewModel.cycleVideoQuality() },
+                            onClearCache = { viewModel.clearAllCache() },
+                            onBack = { viewModel.navigateBackToFeed() }
+                        )
+                        AppScreen.SEARCH -> SearchScreen(
+                            uiState = uiState,
+                            onQueryChange = { q -> viewModel.updateSearchQuery(q) },
+                            onSubmitSearch = { q -> viewModel.submitSearch(q) },
+                            onSelectTab = { tab -> viewModel.selectSearchTab(tab) },
+                            onOpenUserProfile = { author -> viewModel.openAuthorProfile(author) },
+                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
+                            onBack = { viewModel.navigateBackToFeed() }
+                        )
+                        AppScreen.SETTINGS -> SettingsScreen(
+                            settings = uiState.settings,
+                            cacheSizeText = uiState.cacheSizeText,
+                            onToggleAutoScroll = { viewModel.toggleAutoScroll() },
+                            onToggleAutoplay = { viewModel.toggleAutoplay() },
+                            onCycleQuality = { viewModel.cycleVideoQuality() },
+                            onClearCache = { viewModel.clearAllCache() },
+                            onBack = { viewModel.navigateBackToFeed() }
+                        )
                     }
 
-                    // Global TV Toast Pill
                     AnimatedVisibility(
                         visible = uiState.toastMessage != null,
                         enter = fadeIn(),
                         exit = fadeOut(),
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 28.dp)
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 28.dp)
                     ) {
                         Box(
                             modifier = Modifier
