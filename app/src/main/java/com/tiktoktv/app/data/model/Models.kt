@@ -68,6 +68,14 @@ data class VideoItem(
         VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }
         VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }
     }
+
+    fun resolveCandidateUrls(quality: VideoQuality): List<String> {
+        val primary = resolveUrlForQuality(quality)
+        return listOf(primary, videoUrl, sdVideoUrl, hdVideoUrl)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .distinct()
+    }
 }
 
 data class Comment(
