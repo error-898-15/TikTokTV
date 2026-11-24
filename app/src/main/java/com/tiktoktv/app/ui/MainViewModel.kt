@@ -661,7 +661,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun warmCategoryPreviews() {
         viewModelScope.launch {
-            val initialCats = ScraperConfig.DEFAULT_CATEGORIES.take(6)
+            // Let the main feed request go first; the mirror API is limited to ~1 request/second.
+            delay(5000L)
+            val initialCats = ScraperConfig.DEFAULT_CATEGORIES.filter { it.id != "for_you" }.take(5)
             initialCats.forEach { cat ->
                 repo.getCategoryFeed(cat).onSuccess { page ->
                     val cover = page.videos.firstOrNull()?.coverUrl.orEmpty()
