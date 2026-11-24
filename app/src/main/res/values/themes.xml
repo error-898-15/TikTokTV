@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TikTokTV" parent="@style/Theme.Leanback">
+        <item name="android:windowBackground">@color/tv_black</item>
+        <item name="android:colorPrimary">@color/tiktok_pink</item>
+        <item name="android:colorAccent">@color/tiktok_cyan</item>
+    </style>
+</resources>
