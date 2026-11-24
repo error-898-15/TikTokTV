@@ -1,138 +1,170 @@
-package com.tiktoktv.app.data.config
+package com.tiktoktv.app.data.model
 
-import com.tiktoktv.app.data.model.Category
+data class Category(
+    val id: String,
+    val label: String,
+    val slug: String,
+    val hashtag: String,
+    val previewImageUrl: String = ""
+)
 
-/**
- * Centralized scraping & API configuration.
- * Update URLs, headers, JSON keys, and Jsoup selectors here if upstream structures change.
- */
-object ScraperConfig {
-    // Base URLs
-    const val TIKTOK_WEB_BASE = "https://www.tiktok.com"
-    const val TIKTOK_EXPLORE_URL = "$TIKTOK_WEB_BASE/explore"
-    const val TIKTOK_LIVE_URL = "$TIKTOK_WEB_BASE/live"
-    const val TIKTOK_TAG_URL_TEMPLATE = "$TIKTOK_WEB_BASE/tag/%s"
-    const val TIKTOK_DISCOVER_URL_TEMPLATE = "$TIKTOK_WEB_BASE/discover/%s"
-    const val TIKTOK_PROFILE_URL_TEMPLATE = "$TIKTOK_WEB_BASE/@%s"
-    const val TIKTOK_VIDEO_SHARE_TEMPLATE = "$TIKTOK_WEB_BASE/@%s/video/%s"
+data class Author(
+    val id: String,
+    val username: String,
+    val displayName: String,
+    val avatarUrl: String = "",
+    val bio: String = "",
+    val verified: Boolean = false,
+    val secUid: String = "",
+    val followingCount: Long = 0L,
+    val followersCount: Long = 0L,
+    val likesCount: Long = 0L,
+    val videoCount: Long = 0L
+)
 
-    // Direct TikTok Web JSON Endpoints (session cookies warmed from TIKTOK_EXPLORE_URL)
-    const val TIKTOK_EXPLORE_API = "$TIKTOK_WEB_BASE/api/explore/item_list/"
-    const val TIKTOK_POST_ITEM_LIST = "$TIKTOK_WEB_BASE/api/post/item_list/"
-    const val TIKTOK_COMMENT_API = "$TIKTOK_WEB_BASE/api/comment/list/"
-
-    // Live Autocomplete Endpoint
-    const val API_SEARCH_SUGGEST = "https://suggestqueries.google.com/complete/search"
-
-    // Public JSON Mirror Endpoints
-    const val PUBLIC_API_BASE = "https://www.tikwm.com/api"
-    const val API_TRENDING_FEED = "$PUBLIC_API_BASE/feed/list"
-    const val API_SEARCH_FEED = "$PUBLIC_API_BASE/feed/search"
-    const val API_USER_SEARCH = "$PUBLIC_API_BASE/user/search"
-    const val API_USER_POSTS = "$PUBLIC_API_BASE/user/posts"
-    const val API_USER_INFO = "$PUBLIC_API_BASE/user/info"
-    const val API_COMMENT_LIST = "$PUBLIC_API_BASE/comment/list"
-
-    // Network & Cache Settings
-    const val CONNECT_TIMEOUT_SEC = 12L
-    const val READ_TIMEOUT_SEC = 18L
-    const val HTTP_DISK_CACHE_BYTES = 80L * 1024L * 1024L // 80 MB
-    const val MEMORY_CACHE_TTL_MS = 3 * 60 * 1000L // 3 minutes (never blocks fresh launch)
-    const val DISK_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
-    const val BLOCKED_ENDPOINT_COOLDOWN_MS = 5 * 60 * 1000L // 5 min circuit breaker for CF-blocked routes
-    const val DEFAULT_PAGE_SIZE = 18
-
-    // Region pool rotated on every launch/refresh for fresh content
-    val TRENDING_REGION_POOL: List<String> = listOf(
-        "US", "GB", "CA", "AU", "SG", "DE", "FR", "BR", "JP", "ID"
-    )
-
-    // HTTP Headers
-    const val HEADER_USER_AGENT_KEY = "User-Agent"
-    const val HEADER_USER_AGENT_VALUE =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    const val HEADER_MOBILE_USER_AGENT_VALUE =
-        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-    const val HEADER_ACCEPT_LANGUAGE_KEY = "Accept-Language"
-    const val HEADER_ACCEPT_LANGUAGE_VALUE = "en-US,en;q=0.9"
-    const val HEADER_REFERER_KEY = "Referer"
-    const val HEADER_REFERER_VALUE = "$TIKTOK_WEB_BASE/"
-    const val HEADER_ACCEPT_KEY = "Accept"
-    const val HEADER_ACCEPT_HTML =
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-    const val HEADER_ACCEPT_JSON = "application/json, text/plain, */*"
-
-    // Jsoup HTML Selectors
-    const val SELECTOR_UNIVERSAL_DATA_SCRIPT = "script#__UNIVERSAL_DATA_FOR_REHYDRATION__"
-    const val SELECTOR_API_DATA_SCRIPT = "script#api-data"
-    const val SELECTOR_SIGI_STATE_SCRIPT = "script#SIGI_STATE"
-    const val SELECTOR_NEXT_DATA_SCRIPT = "script#__NEXT_DATA__"
-    const val SELECTOR_OG_VIDEO = "meta[property=og:video]"
-    const val SELECTOR_OG_IMAGE = "meta[property=og:image]"
-    const val SELECTOR_OG_TITLE = "meta[property=og:title]"
-    const val SELECTOR_OG_DESCRIPTION = "meta[property=og:description]"
-    const val SELECTOR_USER_TITLE = "[data-e2e=user-title]"
-    const val SELECTOR_USER_SUBTITLE = "[data-e2e=user-subtitle]"
-    const val SELECTOR_USER_BIO = "[data-e2e=user-bio]"
-    const val SELECTOR_USER_AVATAR = "[data-e2e=user-avatar] img"
-    const val SELECTOR_FOLLOWING_COUNT = "[data-e2e=following-count]"
-    const val SELECTOR_FOLLOWERS_COUNT = "[data-e2e=followers-count]"
-    const val SELECTOR_LIKES_COUNT = "[data-e2e=likes-count]"
-    const val SELECTOR_VIDEO_CARD_LINKS = "a[href*=/video/]"
-
-    // Embedded JSON Keys
-    const val JSON_KEY_DEFAULT_SCOPE = "__DEFAULT_SCOPE__"
-    const val JSON_KEY_ITEM_MODULE = "ItemModule"
-    const val JSON_KEY_USER_MODULE = "UserModule"
-    const val JSON_KEY_USERS = "users"
-    const val JSON_KEY_STATS = "stats"
-    const val JSON_KEY_WEBAPP_USER_DETAIL = "webapp.user-detail"
-    const val JSON_KEY_WEBAPP_EXPLORE = "webapp.explore-detail"
-    const val JSON_KEY_USER_INFO = "userInfo"
-
-    // TikTok Explore categoryType IDs
-    val EXPLORE_CATEGORY_TYPE_MAP: Map<String, Int> = mapOf(
-        "for_you" to 120,
-        "following" to 119,
-        "comedy" to 104,
-        "learning" to 116,
-        "sports" to 112,
-        "travel" to 105,
-        "animals" to 113,
-        "art" to 100,
-        "food" to 111,
-        "games" to 103,
-        "entertainment" to 101,
-        "music" to 119,
-        "dance" to 119
-    )
-
-    val DEFAULT_CATEGORIES: List<Category> = listOf(
-        Category(id = "for_you", label = "For You", slug = "foryou", hashtag = "fyp"),
-        Category(id = "following", label = "Following", slug = "following", hashtag = "trending"),
-        Category(id = "comedy", label = "Comedy", slug = "comedy", hashtag = "comedy"),
-        Category(id = "learning", label = "Learning", slug = "learning", hashtag = "learnontiktok"),
-        Category(id = "sports", label = "Sports", slug = "sports", hashtag = "sports"),
-        Category(id = "travel", label = "Travel", slug = "travel", hashtag = "travel"),
-        Category(id = "animals", label = "Animals", slug = "animals", hashtag = "animals"),
-        Category(id = "art", label = "Art", slug = "art", hashtag = "art"),
-        Category(id = "food", label = "Food", slug = "food", hashtag = "food"),
-        Category(id = "games", label = "Games", slug = "games", hashtag = "gaming"),
-        Category(id = "entertainment", label = "Entertainment", slug = "entertainment", hashtag = "entertainment"),
-        Category(id = "music", label = "Music", slug = "music", hashtag = "music"),
-        Category(id = "dance", label = "Dance", slug = "dance", hashtag = "dance")
-    )
-
-    val TRENDING_SEARCH_CHIPS: List<String> = listOf(
-        "#comedy",
-        "#travel",
-        "#animals",
-        "#food",
-        "#gaming",
-        "#sports",
-        "#learning",
-        "#music"
-    )
+data class MusicInfo(
+    val id: String = "",
+    val title: String = "",
+    val author: String = "",
+    val coverUrl: String = ""
+) {
+    val displayText: String
+        get() = when {
+            title.isBlank() -> "Original Sound"
+            author.isBlank() || title.contains(author, ignoreCase = true) -> title
+            else -> "$title - $author"
+        }
 }
+
+data class VideoStats(
+    val likesCount: Long = 0L,
+    val commentsCount: Long = 0L,
+    val sharesCount: Long = 0L,
+    val viewsCount: Long = 0L
+)
+
+enum class VideoQuality(val label: String) {
+    AUTO("Auto"),
+    HD_1080("1080p"),
+    HD_720("720p"),
+    SD_480("480p")
+}
+
+data class VideoItem(
+    val id: String,
+    val videoUrl: String,
+    val hdVideoUrl: String = "",
+    val sdVideoUrl: String = "",
+    val coverUrl: String = "",
+    val caption: String = "",
+    val hashtags: List<String> = emptyList(),
+    val author: Author,
+    val music: MusicInfo = MusicInfo(),
+    val stats: VideoStats = VideoStats(),
+    val shareUrl: String = "",
+    val createdAt: Long = 0L,
+    val isLiked: Boolean = false,
+    val isSaved: Boolean = false
+) {
+    fun resolveUrlForQuality(quality: VideoQuality): String = when (quality) {
+        VideoQuality.AUTO -> videoUrl
+        VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }
+        VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }
+    }
+
+    fun resolveCandidateUrls(quality: VideoQuality): List<String> {
+        val primary = resolveUrlForQuality(quality)
+        return listOf(primary, videoUrl, sdVideoUrl, hdVideoUrl)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .distinct()
+    }
+}
+
+data class Comment(
+    val id: String,
+    val authorName: String,
+    val authorUsername: String = "",
+    val authorAvatarUrl: String = "",
+    val text: String,
+    val likesCount: Long = 0L,
+    val createdAtText: String = "",
+    val isLiked: Boolean = false
+)
+
+data class FeedPage(
+    val videos: List<VideoItem>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean = false
+)
+
+data class UserProfileResult(
+    val author: Author,
+    val videos: List<VideoItem>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean = false
+)
+
+enum class SearchTab(val label: String) {
+    TOP("Top"),
+    USERS("Users"),
+    VIDEOS("Videos"),
+    LIVE("Live"),
+    HASHTAGS("Hashtags")
+}
+
+enum class SuggestionType {
+    HISTORY,
+    TRENDING,
+    KEYWORD,
+    CREATOR,
+    HASHTAG
+}
+
+data class SearchSuggestion(
+    val text: String,
+    val type: SuggestionType,
+    val subtitle: String = "",
+    val avatarUrl: String = "",
+    val verified: Boolean = false
+)
+
+data class LiveStreamItem(
+    val id: String,
+    val roomId: String,
+    val title: String,
+    val host: Author,
+    val viewerCount: Long = 0L,
+    val coverUrl: String = "",
+    val streamUrl: String = "",
+    val category: String = "Live"
+)
+
+data class HashtagResult(
+    val tag: String,
+    val viewCountText: String = "",
+    val videoCount: Int = 0,
+    val previewCoverUrl: String = ""
+)
+
+data class UnifiedSearchResult(
+    val query: String,
+    val videos: List<VideoItem> = emptyList(),
+    val users: List<Author> = emptyList(),
+    val liveStreams: List<LiveStreamItem> = emptyList(),
+    val hashtags: List<HashtagResult> = emptyList(),
+    val relatedQueries: List<String> = emptyList(),
+    val nextCursor: String? = null,
+    val hasMore: Boolean = false
+)
+
+data class AppSettings(
+    val autoScroll: Boolean = true,
+    val autoplay: Boolean = true,
+    val videoQuality: VideoQuality = VideoQuality.AUTO
+)
+
+class ScraperException(
+    message: String,
+    cause: Throwable? = null
+) : Exception(message, cause)
