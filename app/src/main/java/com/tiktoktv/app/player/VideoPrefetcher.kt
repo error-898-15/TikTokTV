@@ -33,7 +33,7 @@ class VideoPrefetcher(
     val simpleCache: SimpleCache = SimpleCache(cacheDir, evictor, databaseProvider)
 
     private val upstreamFactory = OkHttpDataSource.Factory(okHttpClient)
-        .setUserAgent(ScraperConfig.HEADER_USER_AGENT_VALUE)
+        .setUserAgent(ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE)
         .setDefaultRequestProperties(
             mapOf(
                 ScraperConfig.HEADER_REFERER_KEY to ScraperConfig.HEADER_REFERER_VALUE
