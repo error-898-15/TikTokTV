@@ -122,7 +122,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         loadCategoryFeed(ScraperConfig.DEFAULT_CATEGORIES.first(), forceRefresh = false)
         refreshCacheSize()
-        warmCategoryPreviews()
     }
 
     fun finishSplash() {
@@ -451,7 +450,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectProfileTab(tab: ProfileTab) {
         _uiState.update { state ->
             val updatedVideos = when {
-                tab == ProfileTab.LIKED_VIDEOS -> prefs.getLikedVideos()
                 state.isOwnProfile && tab == ProfileTab.PROFILE -> prefs.getSavedVideos()
                 else -> state.profileVideos
             }
@@ -465,27 +463,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retryProfile() {
         val username = _uiState.value.profileAuthor?.username ?: return
-        loadProfileData(username)
+        loadProfileData(username, forceRefresh = true)
     }
 
-    private fun loadProfileData(username: String) {
+    private fun loadProfileData(username: String, forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isProfileLoading = true, profileError = null) }
-            val result = repo.getUserProfile(username)
+            val result = repo.getUserProfile(username, forceRefresh = forceRefresh)
+            val cleanTarget = username.trim().removePrefix("@")
+            val knownLocalVideos = (_uiState.value.feedVideos +
+                _uiState.value.searchResults +
+                _uiState.value.likedVideos +
+                _uiState.value.savedVideos)
+                .filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
+                .distinctBy { it.id }
+
             result.onSuccess { res ->
+                val mergedVideos = (res.videos + knownLocalVideos).distinctBy { it.id }
+                val existingAuthor = _uiState.value.profileAuthor
+                val mergedAuthor = res.author.copy(
+                    avatarUrl = res.author.avatarUrl.ifBlank { existingAuthor?.avatarUrl.orEmpty() },
+                    displayName = res.author.displayName.ifBlank { existingAuthor?.displayName ?: cleanTarget }
+                )
                 _uiState.update {
                     it.copy(
                         isProfileLoading = false,
-                        profileAuthor = res.author,
-                        profileVideos = hydrateLocalFlags(res.videos),
+                        profileAuthor = mergedAuthor,
+                        profileVideos = hydrateLocalFlags(mergedVideos),
                         profileError = null
                     )
                 }
             }.onFailure { err ->
+                val fallbackHydrated = hydrateLocalFlags(knownLocalVideos)
                 _uiState.update {
                     it.copy(
                         isProfileLoading = false,
-                        profileError = err.message ?: "Failed to load profile."
+                        profileVideos = fallbackHydrated,
+                        profileError = if (fallbackHydrated.isEmpty()) {
+                            err.message ?: "Failed to load profile."
+                        } else null
                     )
                 }
             }
@@ -632,8 +648,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val videos = _uiState.value.feedVideos
         val video = videos.getOrNull(index) ?: return
         val quality = _uiState.value.settings.videoQuality
-        val url = video.resolveUrlForQuality(quality)
-        playerManager.playVideo(url, autoplay = _uiState.value.settings.autoplay)
+        val candidateUrls = video.resolveCandidateUrls(quality)
+        playerManager.playVideo(candidateUrls, autoplay = _uiState.value.settings.autoplay)
         prefetchNextTwo(index)
     }
 
@@ -656,30 +672,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isLiked = liked.contains(item.id),
                 isSaved = saved.contains(item.id)
             )
-        }
-    }
-
-    private fun warmCategoryPreviews() {
-        viewModelScope.launch {
-            // Let the main feed request go first; the mirror API is limited to ~1 request/second.
-            delay(5000L)
-            val initialCats = ScraperConfig.DEFAULT_CATEGORIES.filter { it.id != "for_you" }.take(5)
-            initialCats.forEach { cat ->
-                repo.getCategoryFeed(cat).onSuccess { page ->
-                    val cover = page.videos.firstOrNull()?.coverUrl.orEmpty()
-                    if (cover.isNotBlank()) {
-                        _uiState.update { state ->
-                            state.copy(
-                                categories = state.categories.map { existing ->
-                                    if (existing.id == cat.id && existing.previewImageUrl.isBlank()) {
-                                        existing.copy(previewImageUrl = cover)
-                                    } else existing
-                                }
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
 
