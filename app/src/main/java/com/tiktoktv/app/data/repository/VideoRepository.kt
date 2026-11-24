@@ -3,25 +3,37 @@ package com.tiktoktv.app.data.repository
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
 import com.tiktoktv.app.data.model.FeedPage
+import com.tiktoktv.app.data.model.SearchSuggestion
+import com.tiktoktv.app.data.model.UnifiedSearchResult
 import com.tiktoktv.app.data.model.UserProfileResult
 
 interface VideoRepository {
-
     suspend fun getForYouFeed(
         cursor: String? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        excludeIds: Set<String> = emptySet()
     ): Result<FeedPage>
 
     suspend fun getCategoryFeed(
         category: Category,
         cursor: String? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        excludeIds: Set<String> = emptySet()
     ): Result<FeedPage>
 
     suspend fun searchVideos(
         query: String,
         cursor: String? = null
     ): Result<FeedPage>
+
+    suspend fun searchUnified(
+        query: String,
+        cursor: String? = null
+    ): Result<UnifiedSearchResult>
+
+    suspend fun getSearchSuggestions(
+        query: String
+    ): List<SearchSuggestion>
 
     suspend fun getUserProfile(
         username: String,
@@ -35,6 +47,5 @@ interface VideoRepository {
     ): Result<List<Comment>>
 
     suspend fun clearCache(): Long
-
     suspend fun getCacheSizeBytes(): Long
 }
