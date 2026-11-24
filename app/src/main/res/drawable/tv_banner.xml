@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Pure black TV banner background -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M0,0h320v180h-320z" />
+
+    <!-- Subtle top-right pink & bottom-left cyan accent glow bars -->
+    <path
+        android:fillColor="#1AFE2C55"
+        android:pathData="M0,0h320v4h-320z" />
+    <path
+        android:fillColor="#1A25F4EE"
+        android:pathData="M0,176h320v4h-320z" />
+
+    <!-- Cyan music note shadow -->
+    <path
+        android:fillColor="#25F4EE"
+        android:pathData="M168,38h13c2,15 11,24 25,26v14c-9,-0.5 -18,-3.5 -25,-8.5v39.5c0,19.5 -15.5,35 -35,35s-35,-15.5 -35,-35s15.5,-35 35,-35c3,0 6,0.5 8.5,1.2v15.3c-2.5,-1 -5.5,-1.5 -8.5,-1.5c-11,0 -20,9 -20,20s9,20 20,20s20,-9 20,-20V38z" />
+
+    <!-- Pink music note offset -->
+    <path
+        android:fillColor="#FE2C55"
+        android:pathData="M174,44h13c2,15 11,24 25,26v14c-9,-0.5 -18,-3.5 -25,-8.5v39.5c0,19.5 -15.5,35 -35,35s-35,-15.5 -35,-35s15.5,-35 35,-35c3,0 6,0.5 8.5,1.2v15.3c-2.5,-1 -5.5,-1.5 -8.5,-1.5c-11,0 -20,9 -20,20s9,20 20,20s20,-9 20,-20V44z" />
+
+    <!-- White center note overlap -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M171,41h13c2,15 11,24 25,26v14c-9,-0.5 -18,-3.5 -25,-8.5v39.5c0,19.5 -15.5,35 -35,35s-35,-15.5 -35,-35s15.5,-35 35,-35c3,0 6,0.5 8.5,1.2v15.3c-2.5,-1 -5.5,-1.5 -8.5,-1.5c-11,0 -20,9 -20,20s9,20 20,20s20,-9 20,-20V41z" />
+</vector>
