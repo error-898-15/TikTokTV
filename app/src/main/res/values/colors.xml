@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tv_black">#FF000000</color>
+    <color name="tiktok_pink">#FFFE2C55</color>
+    <color name="tiktok_cyan">#FF25F4EE</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
