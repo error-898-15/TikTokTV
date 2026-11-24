@@ -13,9 +13,14 @@ import com.tiktoktv.app.data.model.AppSettings
 import com.tiktoktv.app.data.model.Author
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
+import com.tiktoktv.app.data.model.HashtagResult
+import com.tiktoktv.app.data.model.LiveStreamItem
+import com.tiktoktv.app.data.model.SearchSuggestion
+import com.tiktoktv.app.data.model.SearchTab
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.data.model.VideoQuality
 import com.tiktoktv.app.util.formatBytes
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +49,7 @@ enum class FeedOverlayMode {
 enum class ProfileTab {
     PROFILE,
     LIKED_VIDEOS,
+    HISTORY,
     SETTINGS
 }
 
@@ -59,28 +65,35 @@ data class UiState(
     val feedError: String? = null,
     val nextCursor: String? = null,
     val hasMore: Boolean = true,
-
     // Comments
     val comments: List<Comment> = emptyList(),
     val isCommentsLoading: Boolean = false,
     val commentsError: String? = null,
-
-    // Profile
+    // Profile & History
     val profileTab: ProfileTab = ProfileTab.PROFILE,
     val profileAuthor: Author? = null,
     val profileVideos: List<VideoItem> = emptyList(),
     val isProfileLoading: Boolean = false,
+    val isProfileLoadingMore: Boolean = false,
+    val profileNextCursor: String? = null,
+    val profileHasMore: Boolean = false,
     val profileError: String? = null,
     val isOwnProfile: Boolean = true,
     val likedVideos: List<VideoItem> = emptyList(),
     val savedVideos: List<VideoItem> = emptyList(),
-
-    // Search
+    val watchHistory: List<VideoItem> = emptyList(),
+    // Search & Live Suggestions + Tabs
     val searchQuery: String = "",
+    val activeSearchTab: SearchTab = SearchTab.TOP,
+    val searchSuggestions: List<SearchSuggestion> = emptyList(),
+    val showSearchSuggestions: Boolean = false,
     val searchResults: List<VideoItem> = emptyList(),
+    val searchUsers: List<Author> = emptyList(),
+    val searchLiveStreams: List<LiveStreamItem> = emptyList(),
+    val searchHashtags: List<HashtagResult> = emptyList(),
+    val relatedQueries: List<String> = emptyList(),
     val isSearching: Boolean = false,
     val searchError: String? = null,
-
     // Settings & Cache
     val settings: AppSettings = AppSettings(),
     val cacheSizeText: String = "0 MB",
@@ -100,11 +113,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val playerManager = app.playerManager
     private val prefetcher = app.videoPrefetcher
 
+    private var suggestionJob: Job? = null
+
     private val _uiState = MutableStateFlow(
         UiState(
             settings = prefs.getSettings(),
             likedVideos = prefs.getLikedVideos(),
-            savedVideos = prefs.getSavedVideos()
+            savedVideos = prefs.getSavedVideos(),
+            watchHistory = prefs.getWatchHistory()
         )
     )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -120,8 +136,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 nextVideo()
             }
         }
-        loadCategoryFeed(ScraperConfig.DEFAULT_CATEGORIES.first(), forceRefresh = false)
+        loadCategoryFeed(ScraperConfig.DEFAULT_CATEGORIES.first(), forceRefresh = true)
         refreshCacheSize()
+        refreshSuggestions("")
     }
 
     fun finishSplash() {
@@ -136,19 +153,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openCategoryScreen() {
         playerManager.pause()
         _uiState.update {
-            it.copy(
-                currentScreen = AppScreen.CATEGORY_PICKER,
-                overlayMode = FeedOverlayMode.NONE
-            )
+            it.copy(currentScreen = AppScreen.CATEGORY_PICKER, overlayMode = FeedOverlayMode.NONE)
         }
     }
 
     fun closeCategoryScreenWithoutChange() {
         _uiState.update {
-            it.copy(
-                currentScreen = AppScreen.HOME_FEED,
-                overlayMode = FeedOverlayMode.NONE
-            )
+            it.copy(currentScreen = AppScreen.HOME_FEED, overlayMode = FeedOverlayMode.NONE)
         }
         playCurrentVideoIfOnFeed()
     }
@@ -161,21 +172,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeCategory = category
             )
         }
-        loadCategoryFeed(category, forceRefresh = false)
+        loadCategoryFeed(category, forceRefresh = true)
     }
 
     fun loadCategoryFeed(category: Category, forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update {
-                it.copy(
-                    isFeedLoading = true,
-                    feedError = null,
-                    activeCategory = category
-                )
+                it.copy(isFeedLoading = true, feedError = null, activeCategory = category)
             }
-            val result = repo.getCategoryFeed(category, cursor = null, forceRefresh = forceRefresh)
+            val seenIds = prefs.getSeenVideoIds()
+            val result = repo.getCategoryFeed(
+                category = category,
+                cursor = null,
+                forceRefresh = forceRefresh,
+                excludeIds = seenIds
+            )
             result.onSuccess { page ->
                 val hydrated = hydrateLocalFlags(page.videos)
+                hydrated.groupBy { it.author.username }.forEach { (uname, list) ->
+                    prefs.recordAuthorVideos(uname, list)
+                }
                 _uiState.update { state ->
                     state.copy(
                         isFeedLoading = false,
@@ -239,7 +255,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = repo.getCategoryFeed(
                 category = state.activeCategory,
                 cursor = state.nextCursor,
-                forceRefresh = false
+                forceRefresh = false,
+                excludeIds = prefs.getSeenVideoIds()
             )
             result.onSuccess { page ->
                 val existingIds = state.feedVideos.map { it.id }.toSet()
@@ -274,10 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val nowPlaying = playerManager.togglePlayPause()
         viewModelScope.launch {
             _uiState.update {
-                it.copy(
-                    playPauseIndicatorVisible = true,
-                    playPauseIndicatorPlaying = nowPlaying
-                )
+                it.copy(playPauseIndicatorVisible = true, playPauseIndicatorPlaying = nowPlaying)
             }
             delay(900L)
             _uiState.update { it.copy(playPauseIndicatorVisible = false) }
@@ -297,10 +311,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 } else item
             }
-            state.copy(
-                feedVideos = updatedList,
-                likedVideos = prefs.getLikedVideos()
-            )
+            state.copy(feedVideos = updatedList, likedVideos = prefs.getLikedVideos())
         }
     }
 
@@ -311,10 +322,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val updatedList = state.feedVideos.map { item ->
                 if (item.id == video.id) item.copy(isSaved = nowSaved) else item
             }
-            state.copy(
-                feedVideos = updatedList,
-                savedVideos = prefs.getSavedVideos()
-            )
+            state.copy(feedVideos = updatedList, savedVideos = prefs.getSavedVideos())
         }
         showToast(if (nowSaved) "Saved to bookmarks" else "Removed from saved")
     }
@@ -333,18 +341,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val remaining = state.feedVideos.filterNot { it.id == video.id }
         val newIndex = state.currentIndex.coerceAtMost((remaining.size - 1).coerceAtLeast(0))
         _uiState.update {
-            it.copy(
-                feedVideos = remaining,
-                currentIndex = newIndex,
-                overlayMode = FeedOverlayMode.NONE
-            )
+            it.copy(feedVideos = remaining, currentIndex = newIndex, overlayMode = FeedOverlayMode.NONE)
         }
         showToast("We'll show fewer videos like this")
-        if (remaining.isNotEmpty()) {
-            playAndPrefetch(newIndex)
-        } else {
-            retryFeed()
-        }
+        if (remaining.isNotEmpty()) playAndPrefetch(newIndex) else retryFeed()
     }
 
     fun openComments() {
@@ -412,24 +412,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isOwnProfile = false,
                 profileAuthor = author,
                 profileVideos = emptyList(),
+                profileNextCursor = null,
+                profileHasMore = false,
                 isProfileLoading = true,
                 profileError = null
             )
         }
-        loadProfileData(author.username)
+        loadProfileData(author.username, forceRefresh = false)
     }
 
     fun openOwnProfile(initialTab: ProfileTab = ProfileTab.PROFILE) {
         playerManager.pause()
+        val saved = prefs.getSavedVideos()
+        val liked = prefs.getLikedVideos()
+        val history = prefs.getWatchHistory()
         val guestAuthor = Author(
             id = "guest_tv",
             username = "tv_viewer",
             displayName = "TV Viewer",
-            avatarUrl = _uiState.value.likedVideos.firstOrNull()?.author?.avatarUrl.orEmpty(),
+            avatarUrl = liked.firstOrNull()?.author?.avatarUrl.orEmpty(),
             bio = "Watching trending TikToks on Android TV",
-            followingCount = 0L,
-            followersCount = 0L,
-            likesCount = _uiState.value.likedVideos.size.toLong()
+            likesCount = liked.size.toLong()
         )
         _uiState.update {
             it.copy(
@@ -438,25 +441,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 profileTab = initialTab,
                 isOwnProfile = true,
                 profileAuthor = guestAuthor,
-                profileVideos = if (initialTab == ProfileTab.LIKED_VIDEOS) it.likedVideos else it.savedVideos,
+                profileVideos = when (initialTab) {
+                    ProfileTab.LIKED_VIDEOS -> liked
+                    ProfileTab.HISTORY -> history
+                    else -> saved
+                },
+                profileHasMore = false,
                 isProfileLoading = false,
                 profileError = null,
-                likedVideos = prefs.getLikedVideos(),
-                savedVideos = prefs.getSavedVideos()
+                likedVideos = liked,
+                savedVideos = saved,
+                watchHistory = history
             )
         }
     }
 
     fun selectProfileTab(tab: ProfileTab) {
         _uiState.update { state ->
+            val saved = prefs.getSavedVideos()
+            val liked = prefs.getLikedVideos()
+            val history = prefs.getWatchHistory()
             val updatedVideos = when {
-                state.isOwnProfile && tab == ProfileTab.PROFILE -> prefs.getSavedVideos()
+                state.isOwnProfile && tab == ProfileTab.PROFILE -> saved
+                state.isOwnProfile && tab == ProfileTab.LIKED_VIDEOS -> liked
+                state.isOwnProfile && tab == ProfileTab.HISTORY -> history
                 else -> state.profileVideos
             }
             state.copy(
                 profileTab = tab,
                 profileVideos = updatedVideos,
-                likedVideos = prefs.getLikedVideos()
+                likedVideos = liked,
+                savedVideos = saved,
+                watchHistory = history
             )
         }
     }
@@ -466,20 +482,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadProfileData(username, forceRefresh = true)
     }
 
+    fun loadMoreProfileVideos() {
+        val state = _uiState.value
+        val username = state.profileAuthor?.username ?: return
+        val cursor = state.profileNextCursor ?: return
+        if (state.isProfileLoadingMore || !state.profileHasMore) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isProfileLoadingMore = true) }
+            val result = repo.getUserProfile(username, cursor = cursor, forceRefresh = false)
+            result.onSuccess { res ->
+                val existingIds = state.profileVideos.map { it.id }.toSet()
+                val newOnes = hydrateLocalFlags(res.videos).filterNot { existingIds.contains(it.id) }
+                prefs.recordAuthorVideos(username, newOnes)
+                _uiState.update { current ->
+                    current.copy(
+                        isProfileLoadingMore = false,
+                        profileVideos = current.profileVideos + newOnes,
+                        profileNextCursor = res.nextCursor,
+                        profileHasMore = res.hasMore && newOnes.isNotEmpty()
+                    )
+                }
+            }.onFailure {
+                _uiState.update { it.copy(isProfileLoadingMore = false) }
+            }
+        }
+    }
+
     private fun loadProfileData(username: String, forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isProfileLoading = true, profileError = null) }
             val result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
-            val knownLocalVideos = (_uiState.value.feedVideos +
-                _uiState.value.searchResults +
-                _uiState.value.likedVideos +
-                _uiState.value.savedVideos)
-                .filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
+
+            val archivedVideos = prefs.getAuthorVideoHistory(cleanTarget)
+            val knownLocalVideos = (
+                _uiState.value.feedVideos +
+                    _uiState.value.searchResults +
+                    _uiState.value.likedVideos +
+                    _uiState.value.savedVideos +
+                    _uiState.value.watchHistory +
+                    archivedVideos
+                ).filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
                 .distinctBy { it.id }
 
             result.onSuccess { res ->
                 val mergedVideos = (res.videos + knownLocalVideos).distinctBy { it.id }
+                prefs.recordAuthorVideos(cleanTarget, mergedVideos)
                 val existingAuthor = _uiState.value.profileAuthor
                 val mergedAuthor = res.author.copy(
                     avatarUrl = res.author.avatarUrl.ifBlank { existingAuthor?.avatarUrl.orEmpty() },
@@ -490,6 +539,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isProfileLoading = false,
                         profileAuthor = mergedAuthor,
                         profileVideos = hydrateLocalFlags(mergedVideos),
+                        profileNextCursor = res.nextCursor,
+                        profileHasMore = res.hasMore,
                         profileError = null
                     )
                 }
@@ -526,37 +577,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSearch() {
         playerManager.pause()
+        refreshSuggestions(_uiState.value.searchQuery)
         _uiState.update {
             it.copy(
                 currentScreen = AppScreen.SEARCH,
-                overlayMode = FeedOverlayMode.NONE
+                overlayMode = FeedOverlayMode.NONE,
+                showSearchSuggestions = true
             )
         }
     }
 
     fun updateSearchQuery(query: String) {
-        _uiState.update { it.copy(searchQuery = query) }
+        _uiState.update { it.copy(searchQuery = query, showSearchSuggestions = true) }
+        refreshSuggestions(query)
+    }
+
+    fun selectSearchTab(tab: SearchTab) {
+        _uiState.update { it.copy(activeSearchTab = tab) }
+    }
+
+    private fun refreshSuggestions(query: String) {
+        suggestionJob?.cancel()
+        suggestionJob = viewModelScope.launch {
+            if (query.isNotBlank()) delay(220L)
+            val list = repo.getSearchSuggestions(query)
+            _uiState.update { it.copy(searchSuggestions = list) }
+        }
     }
 
     fun submitSearch(query: String = _uiState.value.searchQuery) {
         val clean = query.trim()
         if (clean.isBlank()) return
+        prefs.addSearchHistory(clean)
         _uiState.update {
             it.copy(
                 searchQuery = clean,
                 isSearching = true,
+                showSearchSuggestions = false,
                 searchError = null
             )
         }
         viewModelScope.launch {
-            val result = repo.searchVideos(clean)
-            result.onSuccess { page ->
-                val list = hydrateLocalFlags(page.videos)
+            val result = repo.searchUnified(clean)
+            result.onSuccess { unified ->
+                val list = hydrateLocalFlags(unified.videos)
+                list.groupBy { it.author.username }.forEach { (uname, vids) ->
+                    prefs.recordAuthorVideos(uname, vids)
+                }
+                val isEmptyAll = list.isEmpty() && unified.users.isEmpty() && unified.liveStreams.isEmpty()
                 _uiState.update {
                     it.copy(
                         isSearching = false,
                         searchResults = list,
-                        searchError = if (list.isEmpty()) "No videos matched \"$clean\"" else null
+                        searchUsers = unified.users,
+                        searchLiveStreams = unified.liveStreams,
+                        searchHashtags = unified.hashtags,
+                        relatedQueries = unified.relatedQueries,
+                        searchError = if (isEmptyAll) "No results matched \"$clean\"" else null
                     )
                 }
             }.onFailure { err ->
@@ -574,19 +651,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playerManager.pause()
         refreshCacheSize()
         _uiState.update {
-            it.copy(
-                currentScreen = AppScreen.SETTINGS,
-                overlayMode = FeedOverlayMode.NONE
-            )
+            it.copy(currentScreen = AppScreen.SETTINGS, overlayMode = FeedOverlayMode.NONE)
         }
     }
 
     fun navigateBackToFeed() {
         _uiState.update {
-            it.copy(
-                currentScreen = AppScreen.HOME_FEED,
-                overlayMode = FeedOverlayMode.NONE
-            )
+            it.copy(currentScreen = AppScreen.HOME_FEED, overlayMode = FeedOverlayMode.NONE)
         }
         playCurrentVideoIfOnFeed()
     }
@@ -647,9 +718,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun playAndPrefetch(index: Int) {
         val videos = _uiState.value.feedVideos
         val video = videos.getOrNull(index) ?: return
+        prefs.markVideosSeen(listOf(video.id))
+        prefs.recordWatchHistory(video)
         val quality = _uiState.value.settings.videoQuality
-        val candidateUrls = video.resolveCandidateUrls(quality)
-        playerManager.playVideo(candidateUrls, autoplay = _uiState.value.settings.autoplay)
+        playerManager.playVideo(video.resolveCandidateUrls(quality), autoplay = _uiState.value.settings.autoplay)
         prefetchNextTwo(index)
     }
 
@@ -668,10 +740,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val saved = prefs.getSavedVideoIds()
         val hidden = prefs.getNotInterestedIds()
         return list.filterNot { hidden.contains(it.id) }.map { item ->
-            item.copy(
-                isLiked = liked.contains(item.id),
-                isSaved = saved.contains(item.id)
-            )
+            item.copy(isLiked = liked.contains(item.id), isSaved = saved.contains(item.id))
         }
     }
 
