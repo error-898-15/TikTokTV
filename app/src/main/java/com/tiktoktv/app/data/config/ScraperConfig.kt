@@ -12,10 +12,15 @@ object ScraperConfig {
     const val TIKTOK_WEB_BASE = "https://www.tiktok.com"
     const val TIKTOK_EXPLORE_URL = "$TIKTOK_WEB_BASE/explore"
     const val TIKTOK_TAG_URL_TEMPLATE = "$TIKTOK_WEB_BASE/tag/%s"
+    const val TIKTOK_DISCOVER_URL_TEMPLATE = "$TIKTOK_WEB_BASE/discover/%s"
     const val TIKTOK_PROFILE_URL_TEMPLATE = "$TIKTOK_WEB_BASE/@%s"
     const val TIKTOK_VIDEO_SHARE_TEMPLATE = "$TIKTOK_WEB_BASE/@%s/video/%s"
 
-    // Public JSON Scraper Mirror Endpoints (easy to swap or disable)
+    // Direct TikTok Web JSON Endpoints (session cookies warmed from TIKTOK_EXPLORE_URL)
+    const val TIKTOK_EXPLORE_API = "$TIKTOK_WEB_BASE/api/explore/item_list/"
+    const val TIKTOK_COMMENT_API = "$TIKTOK_WEB_BASE/api/comment/list/"
+
+    // Public JSON Scraper Mirror Endpoints (secondary/search/profile endpoints)
     const val PUBLIC_API_BASE = "https://www.tikwm.com/api"
     const val API_TRENDING_FEED = "$PUBLIC_API_BASE/feed/list"
     const val API_SEARCH_FEED = "$PUBLIC_API_BASE/feed/search"
@@ -36,6 +41,9 @@ object ScraperConfig {
     const val HEADER_USER_AGENT_VALUE =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    const val HEADER_MOBILE_USER_AGENT_VALUE =
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
     const val HEADER_ACCEPT_LANGUAGE_KEY = "Accept-Language"
     const val HEADER_ACCEPT_LANGUAGE_VALUE = "en-US,en;q=0.9"
     const val HEADER_REFERER_KEY = "Referer"
@@ -47,6 +55,7 @@ object ScraperConfig {
 
     // Jsoup HTML Selectors (for direct web page scraping)
     const val SELECTOR_UNIVERSAL_DATA_SCRIPT = "script#__UNIVERSAL_DATA_FOR_REHYDRATION__"
+    const val SELECTOR_API_DATA_SCRIPT = "script#api-data"
     const val SELECTOR_SIGI_STATE_SCRIPT = "script#SIGI_STATE"
     const val SELECTOR_NEXT_DATA_SCRIPT = "script#__NEXT_DATA__"
     const val SELECTOR_OG_VIDEO = "meta[property=og:video]"
@@ -71,6 +80,23 @@ object ScraperConfig {
     const val JSON_KEY_WEBAPP_USER_DETAIL = "webapp.user-detail"
     const val JSON_KEY_WEBAPP_EXPLORE = "webapp.explore-detail"
     const val JSON_KEY_USER_INFO = "userInfo"
+
+    // TikTok Explore categoryType IDs (from webapp.explore.categoryList)
+    val EXPLORE_CATEGORY_TYPE_MAP: Map<String, Int> = mapOf(
+        "for_you" to 120,
+        "following" to 119,
+        "comedy" to 104,
+        "learning" to 116,
+        "sports" to 112,
+        "travel" to 105,
+        "animals" to 113,
+        "art" to 100,
+        "food" to 111,
+        "games" to 103,
+        "entertainment" to 101,
+        "music" to 119,
+        "dance" to 119
+    )
 
     // Default TV Categories matching the TikTok TV Browse Bar
     val DEFAULT_CATEGORIES: List<Category> = listOf(
