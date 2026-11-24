@@ -3,6 +3,7 @@ package com.tiktoktv.app.ui.screens
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,6 +63,7 @@ import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.ui.ProfileTab
 import com.tiktoktv.app.ui.UiState
 import com.tiktoktv.app.ui.components.ErrorScreen
+import com.tiktoktv.app.ui.components.FocusPillButton
 import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.util.formatCompactCount
 
@@ -188,7 +190,7 @@ fun ProfileScreen(
                                 CircularProgressIndicator(color = TikTokColors.Pink)
                             }
                         }
-                        uiState.profileError != null && uiState.profileVideos.isEmpty() -> {
+                        uiState.profileError != null && uiState.profileVideos.isEmpty() && uiState.profileAuthor == null -> {
                             ErrorScreen(
                                 message = uiState.profileError,
                                 onRetry = onRetryProfile
@@ -279,15 +281,34 @@ fun ProfileScreen(
 
                                 Spacer(modifier = Modifier.height(14.dp))
 
-                                VideoFiveColumnGrid(
-                                    videos = uiState.profileVideos,
-                                    emptyText = if (uiState.isOwnProfile) {
-                                        "Bookmarked videos will appear here."
-                                    } else {
-                                        "No public videos found for this creator."
-                                    },
-                                    onVideoClick = { idx -> onPlayVideo(uiState.profileVideos, idx) }
-                                )
+                                if (uiState.profileError != null && uiState.profileVideos.isEmpty()) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        Text(
+                                            text = uiState.profileError,
+                                            color = TikTokColors.TextSecondary,
+                                            fontSize = 16.sp
+                                        )
+                                        Spacer(modifier = Modifier.height(18.dp))
+                                        FocusPillButton(
+                                            label = "Retry",
+                                            onClick = onRetryProfile
+                                        )
+                                    }
+                                } else {
+                                    VideoFiveColumnGrid(
+                                        videos = uiState.profileVideos,
+                                        emptyText = if (uiState.isOwnProfile) {
+                                            "Bookmarked videos will appear here."
+                                        } else {
+                                            "No public videos found for this creator."
+                                        },
+                                        onVideoClick = { idx -> onPlayVideo(uiState.profileVideos, idx) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -325,6 +346,7 @@ private fun SidebarNavItem(
                 if (state.isFocused) onSelect()
             }
             .focusable()
+            .clickable { onSelect() }
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown &&
                     (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
@@ -423,6 +445,7 @@ private fun VideoGridThumbnailCard(
             )
             .onFocusChanged { isFocused = it.isFocused }
             .focusable()
+            .clickable { onClick() }
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown &&
                     (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
