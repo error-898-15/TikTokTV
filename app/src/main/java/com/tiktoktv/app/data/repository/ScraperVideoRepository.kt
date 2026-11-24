@@ -41,6 +41,40 @@ class ScraperVideoRepository(
 
     private val memoryCache = ConcurrentHashMap<String, CacheEntry>()
 
+    // The public mirror API allows ~1 request/second. Requests are serialized and spaced out here.
+    private val apiThrottleLock = Any()
+    private var lastApiCallAt = 0L
+
+    @Volatile
+    private var lastApiError: String? = null
+
+    private fun throttleApi() {
+        synchronized(apiThrottleLock) {
+            val wait = lastApiCallAt + API_MIN_INTERVAL_MS - System.currentTimeMillis()
+            if (wait > 0) Thread.sleep(wait)
+            lastApiCallAt = System.currentTimeMillis()
+        }
+    }
+
+    private fun apiPostJson(url: String, form: FormBody): JSONObject {
+        var attempt = 0
+        while (true) {
+            val root = JSONObject(executePost(url, form))
+            val code = root.optInt("code", -1)
+            if (code == 0) return root
+            val msg = root.optString("msg")
+            if (attempt < 2 && msg.contains("limit", ignoreCase = true)) {
+                attempt++
+                Thread.sleep(1500L)
+                continue
+            }
+            throw ScraperException("API error ($code): $msg")
+        }
+    }
+
+    private fun noVideosMessage(base: String): String =
+        base + (lastApiError?.let { " ($it)" } ?: "")
+
     private val cookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
     private val cookieJar = object : CookieJar {
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
@@ -81,14 +115,19 @@ class ScraperVideoRepository(
                 saveCachedFeed(cacheKey, apiResult)
                 return@runCatching apiResult
             }
+            if (apiResult != null && lastApiError == null) {
+                lastApiError = "API returned 0 playable videos"
+            }
 
-            val htmlPage = fetchAndParseHtmlFeed(ScraperConfig.TIKTOK_EXPLORE_URL)
-            if (htmlPage.videos.isNotEmpty()) {
+            val htmlPage = runCatching { fetchAndParseHtmlFeed(ScraperConfig.TIKTOK_EXPLORE_URL) }
+                .onFailure { if (lastApiError == null) lastApiError = it.message }
+                .getOrNull()
+            if (htmlPage != null && htmlPage.videos.isNotEmpty()) {
                 saveCachedFeed(cacheKey, htmlPage)
                 return@runCatching htmlPage
             }
 
-            throw ScraperException("No videos returned from feed endpoints.")
+            throw ScraperException(noVideosMessage("No videos returned from feed endpoints."))
         }.recoverCatching { throwable ->
             readCachedFeed(cacheKey, allowExpired = true)?.let { return@recoverCatching it }
             throw (throwable as? ScraperException)
@@ -115,15 +154,20 @@ class ScraperVideoRepository(
                 saveCachedFeed(cacheKey, apiResult)
                 return@runCatching apiResult
             }
+            if (apiResult != null && lastApiError == null) {
+                lastApiError = "API returned 0 playable videos"
+            }
 
             val tagUrl = ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format(category.hashtag)
-            val htmlPage = fetchAndParseHtmlFeed(tagUrl)
-            if (htmlPage.videos.isNotEmpty()) {
+            val htmlPage = runCatching { fetchAndParseHtmlFeed(tagUrl) }
+                .onFailure { if (lastApiError == null) lastApiError = it.message }
+                .getOrNull()
+            if (htmlPage != null && htmlPage.videos.isNotEmpty()) {
                 saveCachedFeed(cacheKey, htmlPage)
                 return@runCatching htmlPage
             }
 
-            throw ScraperException("Could not load videos for ${category.label}.")
+            throw ScraperException(noVideosMessage("Could not load videos for ${category.label}."))
         }.recoverCatching { throwable ->
             readCachedFeed(cacheKey, allowExpired = true)?.let { return@recoverCatching it }
             throw (throwable as? ScraperException)
@@ -147,6 +191,9 @@ class ScraperVideoRepository(
             if (apiResult != null && apiResult.videos.isNotEmpty()) {
                 saveCachedFeed(cacheKey, apiResult)
                 return@runCatching apiResult
+            }
+            if (apiResult != null && lastApiError == null) {
+                lastApiError = "API returned 0 playable videos"
             }
 
             val tagUrl = ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format(cleanQuery.replace(" ", ""))
@@ -238,6 +285,7 @@ class ScraperVideoRepository(
     }
 
     private fun fetchTrendingFeedApi(cursor: String?): FeedPage? {
+        lastApiError = null
         return runCatching {
             val form = FormBody.Builder()
                 .add("region", "US")
@@ -247,9 +295,7 @@ class ScraperVideoRepository(
                 }
                 .build()
 
-            val body = executePost(ScraperConfig.API_TRENDING_FEED, form)
-            val root = JSONObject(body)
-            if (root.optInt("code", -1) != 0) return null
+            val root = apiPostJson(ScraperConfig.API_TRENDING_FEED, form)
 
             val data = root.opt("data")
             val list = when (data) {
@@ -265,10 +311,11 @@ class ScraperVideoRepository(
             }
             val hasMore = if (data is JSONObject) data.optBoolean("hasMore", videos.isNotEmpty()) else videos.isNotEmpty()
             FeedPage(videos = videos, nextCursor = nextCursor, hasMore = hasMore)
-        }.getOrNull()
+        }.onFailure { lastApiError = it.message ?: it.javaClass.simpleName }.getOrNull()
     }
 
     private fun fetchSearchFeedApi(keywords: String, cursor: String?): FeedPage? {
+        lastApiError = null
         return runCatching {
             val form = FormBody.Builder()
                 .add("keywords", keywords)
@@ -278,9 +325,7 @@ class ScraperVideoRepository(
                 .add("hd", "1")
                 .build()
 
-            val body = executePost(ScraperConfig.API_SEARCH_FEED, form)
-            val root = JSONObject(body)
-            if (root.optInt("code", -1) != 0) return null
+            val root = apiPostJson(ScraperConfig.API_SEARCH_FEED, form)
 
             val data = root.optJSONObject("data") ?: return null
             val list = data.optJSONArray("videos") ?: JSONArray()
@@ -288,7 +333,7 @@ class ScraperVideoRepository(
             val nextCursor = data.optString("cursor").takeIf { it.isNotBlank() && it != "0" }
             val hasMore = data.optBoolean("hasMore", false)
             FeedPage(videos = videos, nextCursor = nextCursor, hasMore = hasMore)
-        }.getOrNull()
+        }.onFailure { lastApiError = it.message ?: it.javaClass.simpleName }.getOrNull()
     }
 
     private fun fetchUserProfileApi(username: String, cursor: String?): UserProfileResult? {
@@ -628,6 +673,7 @@ class ScraperVideoRepository(
     }
 
     private fun executeGet(url: String, acceptJson: Boolean): String {
+        if (url.startsWith(ScraperConfig.PUBLIC_API_BASE)) throttleApi()
         val request = Request.Builder()
             .url(url)
             .header(ScraperConfig.HEADER_USER_AGENT_KEY, ScraperConfig.HEADER_USER_AGENT_VALUE)
@@ -653,6 +699,7 @@ class ScraperVideoRepository(
     }
 
     private fun executePost(url: String, formBody: FormBody): String {
+        if (url.startsWith(ScraperConfig.PUBLIC_API_BASE)) throttleApi()
         val request = Request.Builder()
             .url(url)
             .header(ScraperConfig.HEADER_USER_AGENT_KEY, ScraperConfig.HEADER_USER_AGENT_VALUE)
@@ -775,6 +822,10 @@ class ScraperVideoRepository(
     private fun dirSize(dir: File): Long {
         if (!dir.exists()) return 0L
         return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    }
+
+    private companion object {
+        const val API_MIN_INTERVAL_MS = 1100L
     }
 
     private data class CacheEntry(val data: Any, val timestamp: Long)
