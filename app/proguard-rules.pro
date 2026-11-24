@@ -1,0 +1,3 @@
+-keep class com.tiktoktv.app.data.model.** { *; }
+-dontwarn org.jsoup.**
+-dontwarn okhttp3.**
