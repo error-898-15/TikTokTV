@@ -1,5 +1,6 @@
 package com.tiktoktv.app.ui.screens
 
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
@@ -41,6 +42,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,6 +50,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
+import com.tiktoktv.app.R
 import com.tiktoktv.app.player.VideoPlayerManager
 import com.tiktoktv.app.ui.FeedOverlayMode
 import com.tiktoktv.app.ui.UiState
@@ -83,7 +87,10 @@ fun HomeFeedScreen(
     onOpenSettings: () -> Unit,
     onRetryFeed: () -> Unit
 ) {
+    val isPlaying by playerManager.isPlaying.collectAsState()
     val isBuffering by playerManager.isBuffering.collectAsState()
+    val hasRenderedFirstFrame by playerManager.hasRenderedFirstFrame.collectAsState()
+    val playbackError by playerManager.playbackError.collectAsState()
     val backdropFailed by playerManager.backdropFailed.collectAsState()
 
     val playerFocusRequester = remember { FocusRequester() }
@@ -166,37 +173,70 @@ fun HomeFeedScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
-                            .aspectRatio(9f / 16f)
-                            .background(TikTokColors.Black),
+                            .aspectRatio(9f / 16f),
                         contentAlignment = Alignment.Center
                     ) {
+                        // Show crisp video cover behind PlayerView until first video frame renders
+                        if (!hasRenderedFirstFrame && video.coverUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = video.coverUrl,
+                                contentDescription = video.caption,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = { ctx ->
-                                PlayerView(ctx).apply {
+                                (LayoutInflater.from(ctx)
+                                    .inflate(R.layout.view_texture_player, null, false) as PlayerView).apply {
                                     layoutParams = ViewGroup.LayoutParams(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT
                                     )
                                     useController = false
-                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    setKeepContentOnPlayerReset(false)
                                     player = playerManager.mainPlayer
                                     isFocusable = false
                                     isFocusableInTouchMode = false
+                                    keepScreenOn = isPlaying
                                 }
                             },
                             update = { view ->
                                 if (view.player !== playerManager.mainPlayer) {
                                     view.player = playerManager.mainPlayer
                                 }
+                                view.keepScreenOn = isPlaying
+                            },
+                            onRelease = { view ->
+                                view.keepScreenOn = false
+                                view.player = null
                             }
                         )
 
-                        if (isBuffering) {
+                        if (isBuffering && playbackError == null) {
                             CircularProgressIndicator(
                                 color = TikTokColors.White.copy(alpha = 0.85f),
                                 modifier = Modifier.size(42.dp)
                             )
+                        }
+
+                        if (playbackError != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Black.copy(alpha = 0.72f))
+                                    .padding(horizontal = 18.dp, vertical = 10.dp)
+                            ) {
+                                Text(
+                                    text = "Video stream unavailable — press RIGHT for next",
+                                    color = TikTokColors.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
 
                         AnimatedVisibility(
