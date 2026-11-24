@@ -11,6 +11,8 @@ jobs:
   build:
     name: Build Debug APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -43,3 +45,15 @@ jobs:
           name: tiktok-tv-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Publish GitHub Release with APK
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk TikTokTV-debug.apk
+          gh release create "build-${{ github.run_number }}" TikTokTV-debug.apk \
+            --title "TikTokTV debug build #${{ github.run_number }}" \
+            --notes "Debug APK built from commit ${{ github.sha }}" \
+            --target "${{ github.sha }}" \
+            --latest
