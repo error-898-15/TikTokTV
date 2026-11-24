@@ -3,6 +3,7 @@ package com.tiktoktv.app.ui.screens
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -96,9 +97,10 @@ fun SearchScreen(
                     .background(if (backFocused) TikTokColors.White else TikTokColors.SurfaceElevated)
                     .onFocusChanged { backFocused = it.isFocused }
                     .focusable()
+                    .clickable { onBack() }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown &&
-                            (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                            (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
                         ) {
                             onBack()
                             true
@@ -116,7 +118,7 @@ fun SearchScreen(
             OutlinedTextField(
                 value = uiState.searchQuery,
                 onValueChange = onQueryChange,
-                placeholder = { Text("Search TikTok videos or #hashtags", color = TikTokColors.TextMuted) },
+                placeholder = { Text("Search TikTok videos, @users or #hashtags", color = TikTokColors.TextMuted) },
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Filled.Search,
@@ -126,7 +128,10 @@ fun SearchScreen(
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onSubmitSearch(uiState.searchQuery) }),
+                keyboardActions = KeyboardActions(
+                    onSearch = { onSubmitSearch(uiState.searchQuery) },
+                    onDone = { onSubmitSearch(uiState.searchQuery) }
+                ),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TikTokColors.White,
                     unfocusedTextColor = TikTokColors.White,
@@ -136,7 +141,16 @@ fun SearchScreen(
                     unfocusedContainerColor = TikTokColors.SurfaceDark
                 ),
                 shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown &&
+                            (event.key == Key.Enter || event.key == Key.NumPadEnter)
+                        ) {
+                            onSubmitSearch(uiState.searchQuery)
+                            true
+                        } else false
+                    }
             )
 
             FocusPillButton(
@@ -170,6 +184,7 @@ fun SearchScreen(
                         .then(if (index == 0) Modifier.focusRequester(firstChipFocus) else Modifier)
                         .onFocusChanged { isFocused = it.isFocused }
                         .focusable()
+                        .clickable { onSubmitSearch(chip) }
                         .onPreviewKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown &&
                                 (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
