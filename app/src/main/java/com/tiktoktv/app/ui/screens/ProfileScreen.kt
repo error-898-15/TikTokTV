@@ -39,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -355,6 +356,22 @@ fun ProfileScreen(
                                         onClick = onRetryProfile
                                     )
                                 }
+                            } else if (uiState.profileVideos.isEmpty() && !uiState.isOwnProfile &&
+                                (uiState.isProfileLoadingMore || uiState.profileHasMore)
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        CircularProgressIndicator(color = TikTokColors.Pink)
+                                        Text(
+                                            text = "Loading all videos...",
+                                            color = TikTokColors.TextSecondary,
+                                            fontSize = 16.sp
+                                        )
+                                    }
+                                }
                             } else if (uiState.profileVideos.isEmpty() && !uiState.isOwnProfile) {
                                 val retryFocus = remember { FocusRequester() }
                                 LaunchedEffect(uiState.profileAuthor?.username) {
@@ -477,18 +494,23 @@ fun VideoFiveColumnGrid(
     }
     val gridState = rememberLazyGridState()
     val uniqueVideos = remember(videos) { videos.distinctBy { it.id } }
+    val currentHasMore by rememberUpdatedState(hasMore)
+    val currentIsLoadingMore by rememberUpdatedState(isLoadingMore)
+    val currentOnLoadMore by rememberUpdatedState(onLoadMore)
     if (onLoadMore != null && hasMore) {
-        LaunchedEffect(gridState, uniqueVideos.size, hasMore, isLoadingMore) {
+        LaunchedEffect(gridState, uniqueVideos.size, hasMore) {
             snapshotFlow {
                 val layoutInfo = gridState.layoutInfo
                 val total = layoutInfo.totalItemsCount
                 val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                total > 0 && (lastVisible >= (total - 10).coerceAtLeast(0) || !gridState.canScrollForward)
+                val nearEnd = total > 0 &&
+                    (lastVisible >= (total - 10).coerceAtLeast(0) || !gridState.canScrollForward)
+                nearEnd && currentHasMore && !currentIsLoadingMore
             }
                 .distinctUntilChanged()
-                .filter { it && hasMore && !isLoadingMore }
+                .filter { it }
                 .collect {
-                    onLoadMore()
+                    currentOnLoadMore?.invoke()
                 }
         }
     }
