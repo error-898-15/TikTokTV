@@ -17,12 +17,19 @@ object ScraperConfig {
     const val TIKTOK_PROFILE_URL_TEMPLATE = "$TIKTOK_WEB_BASE/@%s"
     const val TIKTOK_EMBED_PROFILE_TEMPLATE = "$TIKTOK_WEB_BASE/embed/@%s"
     const val TIKTOK_VIDEO_SHARE_TEMPLATE = "$TIKTOK_WEB_BASE/@%s/video/%s"
+    const val TIKTOK_SEARCH_URL_TEMPLATE = "$TIKTOK_WEB_BASE/search?q=%s"
+    const val TIKTOK_SEARCH_VIDEO_URL_TEMPLATE = "$TIKTOK_WEB_BASE/search/video?q=%s"
 
     // Direct TikTok Web JSON Endpoints (session cookies warmed from TIKTOK_EXPLORE_URL)
     const val TIKTOK_EXPLORE_API = "$TIKTOK_WEB_BASE/api/explore/item_list/"
     const val TIKTOK_POST_ITEM_LIST = "$TIKTOK_WEB_BASE/api/post/item_list/"
     const val TIKTOK_CREATOR_ITEM_LIST = "$TIKTOK_WEB_BASE/api/creator/item_list/"
     const val TIKTOK_COMMENT_API = "$TIKTOK_WEB_BASE/api/comment/list/"
+    const val TIKTOK_SEARCH_SUGGEST_API = "$TIKTOK_WEB_BASE/api/search/general/preview/"
+    const val TIKTOK_SEARCH_GENERAL_API = "$TIKTOK_WEB_BASE/api/search/general/full/"
+    const val TIKTOK_SEARCH_ITEM_API = "$TIKTOK_WEB_BASE/api/search/item/full/"
+    const val TIKTOK_SEARCH_USER_API = "$TIKTOK_WEB_BASE/api/search/user/full/"
+    const val TIKTOK_SEARCH_LIVE_API = "$TIKTOK_WEB_BASE/api/search/live/full/"
 
     // Live Autocomplete Endpoint
     const val API_SEARCH_SUGGEST = "https://suggestqueries.google.com/complete/search"
@@ -32,6 +39,8 @@ object ScraperConfig {
     const val API_TRENDING_FEED = "$PUBLIC_API_BASE/feed/list"
     const val API_SEARCH_FEED = "$PUBLIC_API_BASE/feed/search"
     const val API_USER_SEARCH = "$PUBLIC_API_BASE/user/search"
+    const val API_CHALLENGE_SEARCH = "$PUBLIC_API_BASE/challenge/search"
+    const val API_CHALLENGE_POSTS = "$PUBLIC_API_BASE/challenge/posts"
     const val API_USER_POSTS = "$PUBLIC_API_BASE/user/posts"
     const val API_USER_INFO = "$PUBLIC_API_BASE/user/info"
     const val API_COMMENT_LIST = "$PUBLIC_API_BASE/comment/list"
