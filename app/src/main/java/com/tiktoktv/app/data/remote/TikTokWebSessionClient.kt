@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -82,6 +83,7 @@ class TikTokWebSessionClient(
         } else {
             ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE
         }
+
         webView?.let { existing ->
             if (existing.settings.userAgentString != targetUa) {
                 existing.settings.userAgentString = targetUa
@@ -93,6 +95,7 @@ class TikTokWebSessionClient(
             }
             return@withContext existing
         }
+
         runCatching {
             val view = WebView(appContext)
             if (useDesktopUa) {
@@ -100,6 +103,7 @@ class TikTokWebSessionClient(
             } else {
                 view.layout(0, 0, 1080, 1920)
             }
+
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
             cookieManager.setAcceptThirdPartyCookies(view, true)
@@ -123,6 +127,7 @@ class TikTokWebSessionClient(
             }
 
             view.addJavascriptInterface(BridgeObject(), "TikTokTvBridge")
+            view.webChromeClient = WebChromeClient()
             view.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(v, url, favicon)
@@ -166,7 +171,7 @@ class TikTokWebSessionClient(
                     val uri = request?.url ?: return null
                     val urlStr = uri.toString()
 
-                    if (urlStr.contains("/api/post/item_list/")) {
+                    if (urlStr.contains("/api/post/item_list/") || urlStr.contains("/api/creator/item_list/")) {
                         capturePostQueryTemplate(uri)
                         return null
                     }
@@ -175,6 +180,7 @@ class TikTokWebSessionClient(
                     if (BLOCKED_EXTENSIONS.any { pathLower.endsWith(it) }) {
                         return emptyResponse()
                     }
+
                     val hostLower = uri.host?.lowercase().orEmpty()
                     if ((hostLower.startsWith("mon") && hostLower.contains("tiktokv")) ||
                         pathLower.contains("monitor_browser")
@@ -184,6 +190,7 @@ class TikTokWebSessionClient(
                     return null
                 }
             }
+
             webView = view
             view
         }.getOrNull()
@@ -318,7 +325,6 @@ class TikTokWebSessionClient(
             timeoutMs = ScraperConfig.WEB_SESSION_TIMEOUT_MS,
             useDesktopUa = useDesktopUa
         )
-
         syncCookiesFromManager()
 
         val parsed = rawResult?.let { runCatching { JSONObject(it) }.getOrNull() }
@@ -333,6 +339,7 @@ class TikTokWebSessionClient(
         if (validJsonBody.isBlank() && combinedDomRefs.isEmpty() && currentUserDetailJson.isBlank()) {
             return null
         }
+
         return WebSessionPageResponse(
             rawApiJson = validJsonBody,
             secUid = effectiveSecUid,
@@ -391,6 +398,7 @@ class TikTokWebSessionClient(
 
         val deferred = CompletableDeferred<Boolean>()
         val targetUrl = ScraperConfig.TIKTOK_PROFILE_URL_TEMPLATE.format(Uri.encode(cleanUser))
+
         withContext(Dispatchers.Main) {
             pageLoadDeferred = null
             view.stopLoading()
@@ -550,7 +558,6 @@ class TikTokWebSessionClient(
           if (!ds && window.__UNIVERSAL_DATA_FOR_REHYDRATION__) {
             ds = window.__UNIVERSAL_DATA_FOR_REHYDRATION__['__DEFAULT_SCOPE__'] || null;
           }
-
           if (ds) {
             const ud = ds['webapp.user-detail'] || {};
             const ui = ud.userInfo || {};
@@ -561,7 +568,6 @@ class TikTokWebSessionClient(
               result.userDetailJson = JSON.stringify(ui);
             }
           }
-
           if (result.secUid && secUidFirstSeenAt < 0) {
             secUidFirstSeenAt = i;
           }
@@ -572,7 +578,6 @@ class TikTokWebSessionClient(
             (ac && (typeof ac.frontierSign === 'function' || typeof ac.sign === 'function'))
           );
           result.mssdkReady = mssdkReady;
-
           const hasCapturedPage = Boolean(window.__TT_CAPTURED_FIRST_POST_PAGE);
           const waitedEnoughAfterSecUid = secUidFirstSeenAt >= 0 && (i - secUidFirstSeenAt) >= 16;
 
@@ -646,7 +651,6 @@ class TikTokWebSessionClient(
           } catch (e) {}
           return out;
         };
-
         const isValidPostJson = (raw) => {
           if (!raw || typeof raw !== 'string') return false;
           const trimmed = raw.trim();
@@ -658,7 +662,6 @@ class TikTokWebSessionClient(
             return false;
           }
         };
-
         const hasItemsInJson = (raw) => {
           if (!isValidPostJson(raw)) return false;
           try {
@@ -716,7 +719,6 @@ class TikTokWebSessionClient(
           }
           return false;
         };
-
         await ensureSigner();
 
         let ds = {};
@@ -773,7 +775,6 @@ class TikTokWebSessionClient(
           for (const [k, v] of Object.entries(defaults)) {
             if (v !== undefined && v !== null) params.set(k, String(v));
           }
-
           try {
             const captured = JSON.parse(${JSONObject.quote(capturedTemplateJson)});
             for (const [k, v] of Object.entries(captured || {})) {
@@ -782,7 +783,6 @@ class TikTokWebSessionClient(
               }
             }
           } catch (e) {}
-
           try {
             if (window.__TT_CAPTURED_POST_URL) {
               const u = new URL(window.__TT_CAPTURED_POST_URL, window.location.origin);
@@ -806,6 +806,33 @@ class TikTokWebSessionClient(
           params.set('cursor', ${JSONObject.quote(cursor)});
           return params;
         };
+
+        const tryCreatorList = async () => {
+          try {
+            const cParams = new URLSearchParams({
+              aid: '1988',
+              secUid: ${JSONObject.quote(secUid)},
+              count: String(Math.min(15, Math.max(1, $count))),
+              cursor: ${JSONObject.quote(cursor)},
+              type: '1'
+            });
+            const cUrl = 'https://www.tiktok.com/api/creator/item_list/?' + cParams.toString();
+            const resp = await window.fetch(cUrl, {
+              method: 'GET',
+              credentials: 'include'
+            });
+            const txt = await resp.text();
+            if (hasItemsInJson(txt)) {
+              return { status: resp.status, body: txt };
+            }
+          } catch (e) {}
+          return null;
+        };
+
+        const creatorRes = await tryCreatorList();
+        if (creatorRes && hasItemsInJson(creatorRes.body)) {
+          return { status: creatorRes.status, body: creatorRes.body, domRefs: collectDomRefs() };
+        }
 
         const baseUrl = 'https://www.tiktok.com/api/post/item_list/';
         const tryFetch = async (qs) => {
@@ -943,10 +970,12 @@ class TikTokWebSessionClient(
             (function() {
               if (window.__TT_NET_HOOKED) return;
               window.__TT_NET_HOOKED = true;
+
               const isPostApi = (u) => typeof u === 'string' && (
                 u.indexOf('/api/post/item_list/') !== -1 ||
                 u.indexOf('/api/creator/item_list/') !== -1
               );
+
               const recordPayload = (url, text) => {
                 try {
                   if (url && isPostApi(url)) {
