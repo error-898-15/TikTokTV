@@ -592,10 +592,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val existingIds = _uiState.value.profileVideos.map { it.id }.toSet()
+            val activeSecUid = _uiState.value.profileAuthor?.secUid.orEmpty()
             val newOnes = hydrateLocalFlags(res.videos)
                 .filter {
                     it.author.username.equals(cleanTarget, ignoreCase = true) ||
-                        it.author.username.equals(res.author.username, ignoreCase = true)
+                        it.author.username.equals(res.author.username, ignoreCase = true) ||
+                        it.author.username.equals(activeAuthorNow, ignoreCase = true) ||
+                        (activeSecUid.isNotBlank() && it.author.secUid == activeSecUid)
                 }
                 .filterNot { existingIds.contains(it.id) }
                 .distinctBy { it.id }
@@ -640,8 +643,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         profileAutoLoadJob?.cancel()
         profileLoadJob = viewModelScope.launch {
             _uiState.update { it.copy(isProfileLoading = true, isProfileLoadingMore = false, profileError = null) }
-            val result = repo.getUserProfile(username, forceRefresh = forceRefresh)
+            var result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
+            if (!forceRefresh && result.getOrNull()?.videos.isNullOrEmpty()) {
+                val retryResult = repo.getUserProfile(username, forceRefresh = true)
+                if (retryResult.isSuccess && !retryResult.getOrNull()?.videos.isNullOrEmpty()) {
+                    result = retryResult
+                }
+            }
 
             result.onSuccess { res ->
                 val resolvedHandle = res.author.username.trim().removePrefix("@")
