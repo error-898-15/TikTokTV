@@ -114,6 +114,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefetcher = app.videoPrefetcher
 
     private var suggestionJob: Job? = null
+    private var feedLoadJob: Job? = null
+    private var profileLoadJob: Job? = null
 
     private val _uiState = MutableStateFlow(
         UiState(
@@ -165,20 +167,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectCategory(category: Category) {
+        playerManager.pause()
         _uiState.update {
             it.copy(
                 currentScreen = AppScreen.HOME_FEED,
                 overlayMode = FeedOverlayMode.NONE,
-                activeCategory = category
+                activeCategory = category,
+                feedVideos = emptyList(),
+                currentIndex = 0,
+                nextCursor = null,
+                hasMore = true,
+                isFeedLoading = true,
+                isLoadingMore = false,
+                feedError = null
             )
         }
         loadCategoryFeed(category, forceRefresh = true)
     }
 
     fun loadCategoryFeed(category: Category, forceRefresh: Boolean = false) {
-        viewModelScope.launch {
+        feedLoadJob?.cancel()
+        feedLoadJob = viewModelScope.launch {
             _uiState.update {
-                it.copy(isFeedLoading = true, feedError = null, activeCategory = category)
+                it.copy(
+                    isFeedLoading = true,
+                    isLoadingMore = false,
+                    feedError = null,
+                    activeCategory = category
+                )
             }
             val seenIds = prefs.getSeenVideoIds()
             val result = repo.getCategoryFeed(
@@ -187,6 +203,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 forceRefresh = forceRefresh,
                 excludeIds = seenIds
             )
+            if (_uiState.value.activeCategory.id != category.id) return@launch
+
             result.onSuccess { page ->
                 val hydrated = hydrateLocalFlags(page.videos)
                 hydrated.groupBy { it.author.username }.forEach { (uname, list) ->
@@ -250,6 +268,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadMoreFeed(advanceAfterLoad: Boolean = false) {
         val state = _uiState.value
         if (state.isLoadingMore || !state.hasMore) return
+        val expectedCategoryId = state.activeCategory.id
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingMore = true) }
             val result = repo.getCategoryFeed(
@@ -258,9 +277,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 forceRefresh = false,
                 excludeIds = prefs.getSeenVideoIds()
             )
+            if (_uiState.value.activeCategory.id != expectedCategoryId) return@launch
+
             result.onSuccess { page ->
-                val existingIds = state.feedVideos.map { it.id }.toSet()
+                val existingIds = _uiState.value.feedVideos.map { it.id }.toSet()
                 val newOnes = hydrateLocalFlags(page.videos).filterNot { existingIds.contains(it.id) }
+                newOnes.groupBy { it.author.username }.forEach { (uname, list) ->
+                    prefs.recordAuthorVideos(uname, list)
+                }
                 _uiState.update { current ->
                     val combined = current.feedVideos + newOnes
                     val targetIdx = if (advanceAfterLoad && newOnes.isNotEmpty()) {
@@ -272,7 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         feedVideos = combined,
                         currentIndex = targetIdx,
                         nextCursor = page.nextCursor,
-                        hasMore = page.hasMore && newOnes.isNotEmpty(),
+                        hasMore = page.hasMore && (newOnes.isNotEmpty() || page.nextCursor != null),
                         isLoadingMore = false
                     )
                 }
@@ -404,6 +428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openAuthorProfile(author: Author) {
         playerManager.pause()
+        profileLoadJob?.cancel()
         _uiState.update {
             it.copy(
                 currentScreen = AppScreen.PROFILE,
@@ -415,6 +440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 profileNextCursor = null,
                 profileHasMore = false,
                 isProfileLoading = true,
+                isProfileLoadingMore = false,
                 profileError = null
             )
         }
@@ -423,6 +449,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openOwnProfile(initialTab: ProfileTab = ProfileTab.PROFILE) {
         playerManager.pause()
+        profileLoadJob?.cancel()
         val saved = prefs.getSavedVideos()
         val liked = prefs.getLikedVideos()
         val history = prefs.getWatchHistory()
@@ -448,6 +475,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 profileHasMore = false,
                 isProfileLoading = false,
+                isProfileLoadingMore = false,
                 profileError = null,
                 likedVideos = liked,
                 savedVideos = saved,
@@ -492,15 +520,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isProfileLoadingMore = true) }
             val result = repo.getUserProfile(username, cursor = cursor, forceRefresh = false)
             result.onSuccess { res ->
-                val existingIds = state.profileVideos.map { it.id }.toSet()
-                val newOnes = hydrateLocalFlags(res.videos).filterNot { existingIds.contains(it.id) }
-                prefs.recordAuthorVideos(username, newOnes)
+                val cleanTarget = username.trim().removePrefix("@")
+                val existingIds = _uiState.value.profileVideos.map { it.id }.toSet()
+                val newOnes = hydrateLocalFlags(res.videos)
+                    .filter { it.author.username.equals(cleanTarget, ignoreCase = true) || it.author.username.equals(res.author.username, ignoreCase = true) }
+                    .filterNot { existingIds.contains(it.id) }
+                prefs.recordAuthorVideos(res.author.username, newOnes)
                 _uiState.update { current ->
                     current.copy(
                         isProfileLoadingMore = false,
                         profileVideos = current.profileVideos + newOnes,
                         profileNextCursor = res.nextCursor,
-                        profileHasMore = res.hasMore && newOnes.isNotEmpty()
+                        profileHasMore = res.hasMore && !res.nextCursor.isNullOrBlank()
                     )
                 }
             }.onFailure {
@@ -510,29 +541,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadProfileData(username: String, forceRefresh: Boolean = false) {
-        viewModelScope.launch {
+        profileLoadJob?.cancel()
+        profileLoadJob = viewModelScope.launch {
             _uiState.update { it.copy(isProfileLoading = true, profileError = null) }
             val result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
 
-            val archivedVideos = prefs.getAuthorVideoHistory(cleanTarget)
-            val knownLocalVideos = (
-                _uiState.value.feedVideos +
-                    _uiState.value.searchResults +
-                    _uiState.value.likedVideos +
-                    _uiState.value.savedVideos +
-                    _uiState.value.watchHistory +
-                    archivedVideos
-                ).filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
-                .distinctBy { it.id }
-
             result.onSuccess { res ->
+                val resolvedHandle = res.author.username.trim().removePrefix("@")
+                val archivedVideos = (
+                    prefs.getAuthorVideoHistory(cleanTarget) +
+                        prefs.getAuthorVideoHistory(resolvedHandle)
+                    )
+                val knownLocalVideos = (
+                    _uiState.value.feedVideos +
+                        _uiState.value.searchResults +
+                        _uiState.value.likedVideos +
+                        _uiState.value.savedVideos +
+                        _uiState.value.watchHistory +
+                        archivedVideos
+                    ).filter {
+                        it.author.username.equals(cleanTarget, ignoreCase = true) ||
+                            it.author.username.equals(resolvedHandle, ignoreCase = true)
+                    }.distinctBy { it.id }
+
                 val mergedVideos = (res.videos + knownLocalVideos).distinctBy { it.id }
-                prefs.recordAuthorVideos(cleanTarget, mergedVideos)
+                prefs.recordAuthorVideos(resolvedHandle.ifBlank { cleanTarget }, mergedVideos)
                 val existingAuthor = _uiState.value.profileAuthor
                 val mergedAuthor = res.author.copy(
                     avatarUrl = res.author.avatarUrl.ifBlank { existingAuthor?.avatarUrl.orEmpty() },
-                    displayName = res.author.displayName.ifBlank { existingAuthor?.displayName ?: cleanTarget }
+                    displayName = res.author.displayName.ifBlank { existingAuthor?.displayName ?: cleanTarget },
+                    followersCount = maxOf(res.author.followersCount, existingAuthor?.followersCount ?: 0L),
+                    followingCount = maxOf(res.author.followingCount, existingAuthor?.followingCount ?: 0L),
+                    likesCount = maxOf(res.author.likesCount, existingAuthor?.likesCount ?: 0L),
+                    videoCount = maxOf(res.author.videoCount, existingAuthor?.videoCount ?: 0L)
                 )
                 _uiState.update {
                     it.copy(
@@ -540,11 +582,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         profileAuthor = mergedAuthor,
                         profileVideos = hydrateLocalFlags(mergedVideos),
                         profileNextCursor = res.nextCursor,
-                        profileHasMore = res.hasMore,
+                        profileHasMore = res.hasMore && !res.nextCursor.isNullOrBlank(),
                         profileError = null
                     )
                 }
             }.onFailure { err ->
+                val archivedVideos = prefs.getAuthorVideoHistory(cleanTarget)
+                val knownLocalVideos = (
+                    _uiState.value.feedVideos +
+                        _uiState.value.searchResults +
+                        _uiState.value.likedVideos +
+                        _uiState.value.savedVideos +
+                        _uiState.value.watchHistory +
+                        archivedVideos
+                    ).filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
+                    .distinctBy { it.id }
                 val fallbackHydrated = hydrateLocalFlags(knownLocalVideos)
                 _uiState.update {
                     it.copy(
