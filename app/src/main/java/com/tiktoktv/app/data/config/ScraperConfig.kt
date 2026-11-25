@@ -15,11 +15,13 @@ object ScraperConfig {
     const val TIKTOK_TAG_URL_TEMPLATE = "$TIKTOK_WEB_BASE/tag/%s"
     const val TIKTOK_DISCOVER_URL_TEMPLATE = "$TIKTOK_WEB_BASE/discover/%s"
     const val TIKTOK_PROFILE_URL_TEMPLATE = "$TIKTOK_WEB_BASE/@%s"
+    const val TIKTOK_EMBED_PROFILE_TEMPLATE = "$TIKTOK_WEB_BASE/embed/@%s"
     const val TIKTOK_VIDEO_SHARE_TEMPLATE = "$TIKTOK_WEB_BASE/@%s/video/%s"
 
     // Direct TikTok Web JSON Endpoints (session cookies warmed from TIKTOK_EXPLORE_URL)
     const val TIKTOK_EXPLORE_API = "$TIKTOK_WEB_BASE/api/explore/item_list/"
     const val TIKTOK_POST_ITEM_LIST = "$TIKTOK_WEB_BASE/api/post/item_list/"
+    const val TIKTOK_CREATOR_ITEM_LIST = "$TIKTOK_WEB_BASE/api/creator/item_list/"
     const val TIKTOK_COMMENT_API = "$TIKTOK_WEB_BASE/api/comment/list/"
 
     // Live Autocomplete Endpoint
@@ -44,6 +46,7 @@ object ScraperConfig {
     const val DEFAULT_PAGE_SIZE = 18
     const val CATEGORY_PAGE_SIZE = 15
     const val PROFILE_INITIAL_BATCH_SIZE = 30
+    const val PROFILE_CREATOR_PAGE_SIZE = 15
     const val PROFILE_WEB_PAGE_SIZE = 35
     const val HYDRATION_CONCURRENCY = 5
     const val WEB_SESSION_TIMEOUT_MS = 22_000L
@@ -83,6 +86,7 @@ object ScraperConfig {
     const val SELECTOR_API_DATA_SCRIPT = "script#api-data"
     const val SELECTOR_SIGI_STATE_SCRIPT = "script#SIGI_STATE"
     const val SELECTOR_NEXT_DATA_SCRIPT = "script#__NEXT_DATA__"
+    const val SELECTOR_FRONTITY_STATE_SCRIPT = "script#__FRONTITY_CONNECT_STATE__"
     const val SELECTOR_PROFILE_PAGE_LD = "script#ProfilePage"
     const val SELECTOR_ITEM_LIST_LD = "script#ItemList"
     const val SELECTOR_OG_VIDEO = "meta[property=og:video]"
