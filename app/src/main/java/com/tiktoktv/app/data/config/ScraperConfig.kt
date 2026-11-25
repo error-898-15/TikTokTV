@@ -41,6 +41,9 @@ object ScraperConfig {
     const val DISK_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
     const val BLOCKED_ENDPOINT_COOLDOWN_MS = 5 * 60 * 1000L // 5 min circuit breaker for CF-blocked routes
     const val DEFAULT_PAGE_SIZE = 18
+    const val CATEGORY_PAGE_SIZE = 15
+    const val PROFILE_INITIAL_BATCH_SIZE = 30
+    const val HYDRATION_CONCURRENCY = 5
 
     // Region pool rotated on every launch/refresh for fresh content
     val TRENDING_REGION_POOL: List<String> = listOf(
@@ -55,6 +58,12 @@ object ScraperConfig {
     const val HEADER_MOBILE_USER_AGENT_VALUE =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+    const val HEADER_GOOGLEBOT_MOBILE_USER_AGENT_VALUE =
+        "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 " +
+            "(compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+    const val HEADER_GOOGLEBOT_DESKTOP_USER_AGENT_VALUE =
+        "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
     const val HEADER_ACCEPT_LANGUAGE_KEY = "Accept-Language"
     const val HEADER_ACCEPT_LANGUAGE_VALUE = "en-US,en;q=0.9"
     const val HEADER_REFERER_KEY = "Referer"
@@ -69,6 +78,8 @@ object ScraperConfig {
     const val SELECTOR_API_DATA_SCRIPT = "script#api-data"
     const val SELECTOR_SIGI_STATE_SCRIPT = "script#SIGI_STATE"
     const val SELECTOR_NEXT_DATA_SCRIPT = "script#__NEXT_DATA__"
+    const val SELECTOR_PROFILE_PAGE_LD = "script#ProfilePage"
+    const val SELECTOR_ITEM_LIST_LD = "script#ItemList"
     const val SELECTOR_OG_VIDEO = "meta[property=og:video]"
     const val SELECTOR_OG_IMAGE = "meta[property=og:image]"
     const val SELECTOR_OG_TITLE = "meta[property=og:title]"
@@ -92,21 +103,35 @@ object ScraperConfig {
     const val JSON_KEY_WEBAPP_EXPLORE = "webapp.explore-detail"
     const val JSON_KEY_USER_INFO = "userInfo"
 
-    // TikTok Explore categoryType IDs
+    // Exact TikTok Explore categoryType IDs verified against webapp.explore.categoryList
+    // (Genres without an exact Explore ID like Travel, Art, Music, Following use /tag/ scraping directly)
     val EXPLORE_CATEGORY_TYPE_MAP: Map<String, Int> = mapOf(
         "for_you" to 120,
-        "following" to 119,
         "comedy" to 104,
         "learning" to 116,
         "sports" to 112,
-        "travel" to 105,
         "animals" to 113,
-        "art" to 100,
         "food" to 111,
         "games" to 103,
         "entertainment" to 101,
-        "music" to 119,
         "dance" to 119
+    )
+
+    // Primary & secondary hashtags per genre so /tag/ & /discover/ scraping yields deep, accurate feeds
+    val CATEGORY_HASHTAG_ALIASES: Map<String, List<String>> = mapOf(
+        "for_you" to listOf("fyp", "foryou", "viral"),
+        "following" to listOf("trending", "viral", "fyp"),
+        "comedy" to listOf("comedy", "funny", "memes"),
+        "learning" to listOf("learnontiktok", "education", "facts"),
+        "sports" to listOf("sports", "football", "basketball"),
+        "travel" to listOf("travel", "traveltiktok", "travelvlog"),
+        "animals" to listOf("animals", "pets", "cuteanimals"),
+        "art" to listOf("art", "drawing", "artist"),
+        "food" to listOf("food", "foodie", "recipe"),
+        "games" to listOf("gaming", "gamer", "videogames"),
+        "entertainment" to listOf("entertainment", "movies", "celebrity"),
+        "music" to listOf("music", "song", "singer"),
+        "dance" to listOf("dance", "dancing", "choreography")
     )
 
     val DEFAULT_CATEGORIES: List<Category> = listOf(
