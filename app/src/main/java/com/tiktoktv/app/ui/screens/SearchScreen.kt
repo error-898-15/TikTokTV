@@ -22,6 +22,10 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -90,9 +94,13 @@ fun SearchScreen(
     onSelectTab: (SearchTab) -> Unit,
     onOpenUserProfile: (Author) -> Unit,
     onPlayVideo: (List<VideoItem>, Int) -> Unit,
+    onLoadMoreResults: () -> Unit = {},
+    onLoadMoreUsers: () -> Unit = {},
+    onLoadMoreHashtags: () -> Unit = {},
     onBack: () -> Unit
 ) {
     val searchFieldFocus = remember { FocusRequester() }
+
     LaunchedEffect(Unit) {
         runCatching { searchFieldFocus.requestFocus() }
     }
@@ -126,7 +134,7 @@ fun SearchScreen(
                     .clickable { onBack() }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown &&
-                            (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
+                            (event.key == Key.DirectionCenter || event.key == Key.Enter)
                         ) {
                             onBack()
                             true
@@ -206,7 +214,7 @@ fun SearchScreen(
             }
         }
 
-        if (uiState.searchResults.isEmpty() && uiState.searchUsers.isEmpty()) {
+        if (uiState.searchResults.isEmpty() && uiState.searchUsers.isEmpty() && uiState.searchHashtags.isEmpty() && uiState.searchLiveStreams.isEmpty()) {
             Spacer(modifier = Modifier.height(14.dp))
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -273,7 +281,8 @@ fun SearchScreen(
                 }
                 uiState.searchError != null &&
                     uiState.searchResults.isEmpty() &&
-                    uiState.searchUsers.isEmpty() -> {
+                    uiState.searchUsers.isEmpty() &&
+                    uiState.searchHashtags.isEmpty() -> {
                     ErrorScreen(
                         message = uiState.searchError,
                         onRetry = { onSubmitSearch(uiState.searchQuery) }
@@ -305,9 +314,16 @@ fun SearchScreen(
                                 }
                                 VideoFiveColumnGrid(
                                     videos = uiState.searchResults,
-                                    emptyText = "Type a keyword above for live suggestions and exact results.",
+                                    emptyText = if (uiState.searchQuery.isBlank()) {
+                                        "Type a keyword above for live suggestions and exact results."
+                                    } else {
+                                        "No matching videos found for \"${uiState.searchQuery}\"."
+                                    },
                                     onVideoClick = { idx -> onPlayVideo(uiState.searchResults, idx) },
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.weight(1f),
+                                    hasMore = uiState.searchHasMore,
+                                    isLoadingMore = uiState.isSearchLoadingMore,
+                                    onLoadMore = onLoadMoreResults
                                 )
                             }
                         }
@@ -315,7 +331,22 @@ fun SearchScreen(
                             if (uiState.searchUsers.isEmpty()) {
                                 EmptyTabState("No matching users found.")
                             } else {
+                                val usersGridState = rememberLazyGridState()
+                                if (uiState.searchUsersHasMore) {
+                                    LaunchedEffect(usersGridState, uiState.searchUsers.size, uiState.searchUsersHasMore, uiState.isSearchUsersLoadingMore) {
+                                        snapshotFlow {
+                                            val layoutInfo = usersGridState.layoutInfo
+                                            val total = layoutInfo.totalItemsCount
+                                            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                            total > 0 && lastVisible >= total - 3
+                                        }
+                                            .distinctUntilChanged()
+                                            .filter { it && uiState.searchUsersHasMore && !uiState.isSearchUsersLoadingMore }
+                                            .collect { onLoadMoreUsers() }
+                                    }
+                                }
                                 LazyVerticalGrid(
+                                    state = usersGridState,
                                     columns = GridCells.Fixed(3),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                                     verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -335,12 +366,15 @@ fun SearchScreen(
                             VideoFiveColumnGrid(
                                 videos = uiState.searchResults,
                                 emptyText = "No videos found for this query.",
-                                onVideoClick = { idx -> onPlayVideo(uiState.searchResults, idx) }
+                                onVideoClick = { idx -> onPlayVideo(uiState.searchResults, idx) },
+                                hasMore = uiState.searchHasMore,
+                                isLoadingMore = uiState.isSearchLoadingMore,
+                                onLoadMore = onLoadMoreResults
                             )
                         }
                         SearchTab.LIVE -> {
                             if (uiState.searchLiveStreams.isEmpty()) {
-                                EmptyTabState("No active LIVE creators matched right now.")
+                                EmptyTabState("No active LIVE streams matched right now.")
                             } else {
                                 LazyVerticalGrid(
                                     columns = GridCells.Fixed(3),
@@ -361,7 +395,22 @@ fun SearchScreen(
                             if (uiState.searchHashtags.isEmpty()) {
                                 EmptyTabState("No hashtags found.")
                             } else {
+                                val tagsGridState = rememberLazyGridState()
+                                if (uiState.searchHashtagsHasMore) {
+                                    LaunchedEffect(tagsGridState, uiState.searchHashtags.size, uiState.searchHashtagsHasMore, uiState.isSearchHashtagsLoadingMore) {
+                                        snapshotFlow {
+                                            val layoutInfo = tagsGridState.layoutInfo
+                                            val total = layoutInfo.totalItemsCount
+                                            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                            total > 0 && lastVisible >= total - 4
+                                        }
+                                            .distinctUntilChanged()
+                                            .filter { it && uiState.searchHashtagsHasMore && !uiState.isSearchHashtagsLoadingMore }
+                                            .collect { onLoadMoreHashtags() }
+                                    }
+                                }
                                 LazyVerticalGrid(
+                                    state = tagsGridState,
                                     columns = GridCells.Fixed(4),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                                     verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -391,15 +440,15 @@ private fun SuggestionChipCard(
     var isFocused by remember { mutableStateOf(false) }
     val icon = when (suggestion.type) {
         SuggestionType.HISTORY -> Icons.Filled.History
+        SuggestionType.TRENDING -> Icons.Filled.TrendingUp
         SuggestionType.CREATOR -> Icons.Filled.Person
         SuggestionType.HASHTAG -> Icons.Filled.Tag
-        SuggestionType.TRENDING -> Icons.Filled.TrendingUp
         SuggestionType.KEYWORD -> Icons.Filled.Search
     }
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(if (isFocused) TikTokColors.White else TikTokColors.SurfaceDark)
+            .background(if (isFocused) TikTokColors.White else TikTokColors.SurfaceElevated)
             .border(
                 width = 1.dp,
                 color = if (isFocused) TikTokColors.Pink else TikTokColors.Divider,
