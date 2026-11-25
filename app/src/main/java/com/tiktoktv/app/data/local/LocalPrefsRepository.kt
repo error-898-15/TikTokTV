@@ -108,7 +108,7 @@ class LocalPrefsRepository(context: Context) {
         return nowLiked
     }
 
-    // --- Bug 1 Fix: Track recently seen video IDs across app launches ---
+    // --- Track recently seen video IDs across app launches ---
     fun getSeenVideoIds(): Set<String> {
         val json = prefs.getString(KEY_SEEN_IDS_JSON, null) ?: return emptySet()
         return runCatching {
@@ -147,20 +147,28 @@ class LocalPrefsRepository(context: Context) {
         recordAuthorVideos(video.author.username, listOf(video))
     }
 
-    // --- Bug 3 Fix: Persistent per-creator video archive ---
+    // --- Persistent per-creator video archive (strictly authored by username) ---
     fun getAuthorVideoHistory(username: String): List<VideoItem> {
         val key = username.trim().removePrefix("@").lowercase()
         if (key.isBlank()) return emptyList()
         val map = readAuthorArchiveMap()
-        return map[key].orEmpty()
+        return map[key].orEmpty().filter {
+            it.author.username.trim().removePrefix("@").equals(key, ignoreCase = true)
+        }
     }
 
     fun recordAuthorVideos(username: String, videos: List<VideoItem>) {
         val key = username.trim().removePrefix("@").lowercase()
         if (key.isBlank() || videos.isEmpty()) return
+        val ownVideos = videos.filter {
+            it.author.username.trim().removePrefix("@").equals(key, ignoreCase = true)
+        }
+        if (ownVideos.isEmpty()) return
         val map = readAuthorArchiveMap().toMutableMap()
-        val existing = map[key].orEmpty()
-        val merged = (videos + existing).distinctBy { it.id }.take(MAX_VIDEOS_PER_AUTHOR)
+        val existing = map[key].orEmpty().filter {
+            it.author.username.trim().removePrefix("@").equals(key, ignoreCase = true)
+        }
+        val merged = (ownVideos + existing).distinctBy { it.id }.take(MAX_VIDEOS_PER_AUTHOR)
         map[key] = merged
         val trimmedMap = if (map.size > 60) {
             map.entries.toList().takeLast(60).associate { it.key to it.value }
@@ -220,7 +228,7 @@ class LocalPrefsRepository(context: Context) {
         private const val KEY_SEARCH_HISTORY_JSON = "search_history_json"
         private const val MAX_SEEN_IDS = 250
         private const val MAX_WATCH_HISTORY = 100
-        private const val MAX_VIDEOS_PER_AUTHOR = 60
+        private const val MAX_VIDEOS_PER_AUTHOR = 200
         private const val MAX_SEARCH_HISTORY = 15
     }
 }
