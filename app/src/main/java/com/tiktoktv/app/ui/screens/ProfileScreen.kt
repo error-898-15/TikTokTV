@@ -290,25 +290,38 @@ fun ProfileScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                val totalVideosCount = author?.videoCount ?: 0L
                                 Text(
-                                    text = if (uiState.isOwnProfile) {
-                                        "Bookmarked Videos (${uiState.profileVideos.size})"
-                                    } else {
-                                        "Videos (${uiState.profileVideos.size})"
+                                    text = when {
+                                        uiState.isOwnProfile -> "Bookmarked Videos (${uiState.profileVideos.size})"
+                                        (uiState.isProfileLoadingMore || uiState.profileHasMore) &&
+                                            totalVideosCount > uiState.profileVideos.size ->
+                                            "Videos (${uiState.profileVideos.size} / $totalVideosCount)"
+                                        else -> "Videos (${uiState.profileVideos.size})"
                                     },
                                     color = TikTokColors.White,
                                     fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold
                                 )
-                                if (uiState.profileHasMore && !uiState.isProfileLoadingMore) {
+                                if (uiState.isProfileLoadingMore) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Text(
+                                            text = "Loading all videos...",
+                                            color = TikTokColors.TextSecondary,
+                                            fontSize = 14.sp
+                                        )
+                                        CircularProgressIndicator(
+                                            color = TikTokColors.Pink,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                } else if (uiState.profileHasMore) {
                                     FocusPillButton(
                                         label = "Load More Videos",
                                         onClick = onLoadMoreProfile
-                                    )
-                                } else if (uiState.isProfileLoadingMore) {
-                                    CircularProgressIndicator(
-                                        color = TikTokColors.Pink,
-                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
                             }
@@ -447,6 +460,7 @@ fun VideoFiveColumnGrid(
         }
     }
 
+    val uniqueVideos = remember(videos) { videos.distinctBy { it.id } }
     LazyVerticalGrid(
         state = gridState,
         columns = GridCells.Fixed(5),
@@ -455,8 +469,8 @@ fun VideoFiveColumnGrid(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        itemsIndexed(videos, key = { idx, item -> "${item.id}_$idx" }) { index, video ->
-            VideoGridThumbnailCard(video = video, onClick = { onVideoClick(index) })
+        itemsIndexed(uniqueVideos, key = { _, item -> item.id }) { index, video ->
+            VideoGridThumbnailCard(video = video, onClick = { onVideoClick(videos.indexOfFirst { it.id == video.id }.coerceAtLeast(0)) })
         }
     }
 }
