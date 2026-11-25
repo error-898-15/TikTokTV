@@ -37,6 +37,7 @@ import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.ui.theme.TikTokTvTheme
 
 class MainActivity : ComponentActivity() {
+
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,6 +69,7 @@ class MainActivity : ComponentActivity() {
                 Box(modifier = Modifier.fillMaxSize().background(TikTokColors.Black)) {
                     when (uiState.currentScreen) {
                         AppScreen.SPLASH -> SplashScreen(onFinished = { viewModel.finishSplash() })
+
                         AppScreen.HOME_FEED -> HomeFeedScreen(
                             uiState = uiState,
                             playerManager = viewModel.playerManager,
@@ -91,6 +93,7 @@ class MainActivity : ComponentActivity() {
                             onOpenSettings = { viewModel.openSettingsScreen() },
                             onRetryFeed = { viewModel.retryFeed() }
                         )
+
                         AppScreen.CATEGORY_PICKER -> CategoryScreen(
                             categories = uiState.categories,
                             activeCategory = uiState.activeCategory,
@@ -98,6 +101,7 @@ class MainActivity : ComponentActivity() {
                             onSelectCategory = { cat -> viewModel.selectCategory(cat) },
                             onDismiss = { viewModel.closeCategoryScreenWithoutChange() }
                         )
+
                         AppScreen.PROFILE -> ProfileScreen(
                             uiState = uiState,
                             onSelectTab = { tab -> viewModel.selectProfileTab(tab) },
@@ -110,6 +114,7 @@ class MainActivity : ComponentActivity() {
                             onClearCache = { viewModel.clearAllCache() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )
+
                         AppScreen.SEARCH -> SearchScreen(
                             uiState = uiState,
                             onQueryChange = { q -> viewModel.updateSearchQuery(q) },
@@ -117,8 +122,12 @@ class MainActivity : ComponentActivity() {
                             onSelectTab = { tab -> viewModel.selectSearchTab(tab) },
                             onOpenUserProfile = { author -> viewModel.openAuthorProfile(author) },
                             onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
+                            onLoadMoreResults = { viewModel.loadMoreSearchResults() },
+                            onLoadMoreUsers = { viewModel.loadMoreSearchUsers() },
+                            onLoadMoreHashtags = { viewModel.loadMoreSearchHashtags() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )
+
                         AppScreen.SETTINGS -> SettingsScreen(
                             settings = uiState.settings,
                             cacheSizeText = uiState.cacheSizeText,
