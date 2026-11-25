@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +67,8 @@ import com.tiktoktv.app.ui.UiState
 import com.tiktoktv.app.ui.components.FocusPillButton
 import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.util.formatCompactCount
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 
 @Composable
 fun ProfileScreen(
@@ -271,6 +275,9 @@ fun ProfileScreen(
                                             ProfileStatText(count = author.followingCount, label = "Following")
                                             ProfileStatText(count = author.followersCount, label = "Followers")
                                             ProfileStatText(count = author.likesCount, label = "Likes")
+                                            if (author.videoCount > 0L) {
+                                                ProfileStatText(count = author.videoCount, label = "Videos")
+                                            }
                                         }
                                     }
                                 }
@@ -287,7 +294,7 @@ fun ProfileScreen(
                                     text = if (uiState.isOwnProfile) {
                                         "Bookmarked Videos (${uiState.profileVideos.size})"
                                     } else {
-                                        "Video History (${uiState.profileVideos.size})"
+                                        "Videos (${uiState.profileVideos.size})"
                                     },
                                     color = TikTokColors.White,
                                     fontSize = 20.sp,
@@ -334,6 +341,9 @@ fun ProfileScreen(
                                         "No public videos found for this creator yet."
                                     },
                                     onVideoClick = { idx -> onPlayVideo(uiState.profileVideos, idx) },
+                                    hasMore = !uiState.isOwnProfile && uiState.profileHasMore,
+                                    isLoadingMore = uiState.isProfileLoadingMore,
+                                    onLoadMore = if (!uiState.isOwnProfile) onLoadMoreProfile else null,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -409,7 +419,10 @@ fun VideoFiveColumnGrid(
     videos: List<VideoItem>,
     emptyText: String,
     onVideoClick: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    hasMore: Boolean = false,
+    isLoadingMore: Boolean = false,
+    onLoadMore: (() -> Unit)? = null
 ) {
     if (videos.isEmpty()) {
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -417,7 +430,25 @@ fun VideoFiveColumnGrid(
         }
         return
     }
+    val gridState = rememberLazyGridState()
+    if (onLoadMore != null && hasMore) {
+        LaunchedEffect(gridState, videos.size, hasMore, isLoadingMore) {
+            snapshotFlow {
+                val layoutInfo = gridState.layoutInfo
+                val total = layoutInfo.totalItemsCount
+                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                total > 0 && lastVisible >= total - 5
+            }
+                .distinctUntilChanged()
+                .filter { it && hasMore && !isLoadingMore }
+                .collect {
+                    onLoadMore()
+                }
+        }
+    }
+
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(5),
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(4.dp),
