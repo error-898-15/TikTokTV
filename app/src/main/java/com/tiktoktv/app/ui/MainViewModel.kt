@@ -97,6 +97,15 @@ data class UiState(
     val searchHashtags: List<HashtagResult> = emptyList(),
     val relatedQueries: List<String> = emptyList(),
     val isSearching: Boolean = false,
+    val isSearchLoadingMore: Boolean = false,
+    val searchNextCursor: String? = null,
+    val searchHasMore: Boolean = false,
+    val searchUsersNextCursor: String? = null,
+    val searchUsersHasMore: Boolean = false,
+    val isSearchUsersLoadingMore: Boolean = false,
+    val searchHashtagsNextCursor: String? = null,
+    val searchHashtagsHasMore: Boolean = false,
+    val isSearchHashtagsLoadingMore: Boolean = false,
     val searchError: String? = null,
 
     // Settings & Cache
@@ -119,6 +128,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefetcher = app.videoPrefetcher
 
     private var suggestionJob: Job? = null
+    private var searchJob: Job? = null
     private var feedLoadJob: Job? = null
     private var profileLoadJob: Job? = null
     private var profileAutoLoadJob: Job? = null
@@ -781,22 +791,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val clean = query.trim()
         if (clean.isBlank()) return
         prefs.addSearchHistory(clean)
+        searchJob?.cancel()
         _uiState.update {
             it.copy(
                 searchQuery = clean,
                 isSearching = true,
+                isSearchLoadingMore = false,
+                isSearchUsersLoadingMore = false,
+                isSearchHashtagsLoadingMore = false,
+                searchNextCursor = null,
+                searchHasMore = false,
+                searchUsersNextCursor = null,
+                searchUsersHasMore = false,
+                searchHashtagsNextCursor = null,
+                searchHashtagsHasMore = false,
                 showSearchSuggestions = false,
                 searchError = null
             )
         }
-        viewModelScope.launch {
+        searchJob = viewModelScope.launch {
             val result = repo.searchUnified(clean)
+            if (_uiState.value.searchQuery != clean) return@launch
             result.onSuccess { unified ->
                 val list = hydrateLocalFlags(unified.videos)
                 list.groupBy { it.author.username }.forEach { (uname, vids) ->
                     prefs.recordAuthorVideos(uname, vids)
                 }
-                val isEmptyAll = list.isEmpty() && unified.users.isEmpty() && unified.liveStreams.isEmpty()
+                val isEmptyAll = list.isEmpty() &&
+                    unified.users.isEmpty() &&
+                    unified.liveStreams.isEmpty() &&
+                    unified.hashtags.isEmpty()
                 _uiState.update {
                     it.copy(
                         isSearching = false,
@@ -805,6 +829,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         searchLiveStreams = unified.liveStreams,
                         searchHashtags = unified.hashtags,
                         relatedQueries = unified.relatedQueries,
+                        searchNextCursor = unified.nextCursor,
+                        searchHasMore = unified.hasMore && !unified.nextCursor.isNullOrBlank(),
+                        searchUsersNextCursor = unified.usersNextCursor,
+                        searchUsersHasMore = unified.usersHasMore && !unified.usersNextCursor.isNullOrBlank(),
+                        searchHashtagsNextCursor = unified.hashtagsNextCursor,
+                        searchHashtagsHasMore = unified.hashtagsHasMore && !unified.hashtagsNextCursor.isNullOrBlank(),
                         searchError = if (isEmptyAll) "No results matched \"$clean\"" else null
                     )
                 }
@@ -815,6 +845,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         searchError = err.message ?: "Search failed. Please try again."
                     )
                 }
+            }
+        }
+    }
+
+    fun loadMoreSearchResults() {
+        val state = _uiState.value
+        val query = state.searchQuery.trim()
+        val cursor = state.searchNextCursor
+        if (query.isBlank() || cursor.isNullOrBlank() || !state.searchHasMore || state.isSearchLoadingMore || state.isSearching) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSearchLoadingMore = true) }
+            val result = repo.searchUnified(query, cursor = cursor)
+            if (_uiState.value.searchQuery.trim() != query) return@launch
+            result.onSuccess { page ->
+                val existingIds = _uiState.value.searchResults.map { it.id }.toHashSet()
+                val incoming = hydrateLocalFlags(page.videos).filterNot { existingIds.contains(it.id) }
+                incoming.groupBy { it.author.username }.forEach { (uname, vids) ->
+                    prefs.recordAuthorVideos(uname, vids)
+                }
+                val hasNext = page.hasMore && !page.nextCursor.isNullOrBlank()
+                _uiState.update { current ->
+                    current.copy(
+                        searchResults = current.searchResults + incoming,
+                        searchNextCursor = if (hasNext) page.nextCursor else null,
+                        searchHasMore = hasNext,
+                        isSearchLoadingMore = false
+                    )
+                }
+            }.onFailure {
+                _uiState.update { it.copy(isSearchLoadingMore = false) }
+            }
+        }
+    }
+
+    fun loadMoreSearchUsers() {
+        val state = _uiState.value
+        val query = state.searchQuery.trim()
+        val cursor = state.searchUsersNextCursor
+        if (query.isBlank() || cursor.isNullOrBlank() || !state.searchUsersHasMore || state.isSearchUsersLoadingMore) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSearchUsersLoadingMore = true) }
+            val result = repo.searchUsersPage(query, cursor = cursor)
+            if (_uiState.value.searchQuery.trim() != query) return@launch
+            result.onSuccess { page ->
+                val existing = _uiState.value.searchUsers.map { it.username.lowercase() }.toHashSet()
+                val incoming = page.users.filterNot { existing.contains(it.username.lowercase()) }
+                val hasNext = page.hasMore && !page.nextCursor.isNullOrBlank()
+                _uiState.update { current ->
+                    current.copy(
+                        searchUsers = current.searchUsers + incoming,
+                        searchUsersNextCursor = if (hasNext) page.nextCursor else null,
+                        searchUsersHasMore = hasNext,
+                        isSearchUsersLoadingMore = false
+                    )
+                }
+            }.onFailure {
+                _uiState.update { it.copy(isSearchUsersLoadingMore = false) }
+            }
+        }
+    }
+
+    fun loadMoreSearchHashtags() {
+        val state = _uiState.value
+        val query = state.searchQuery.trim()
+        val cursor = state.searchHashtagsNextCursor
+        if (query.isBlank() || cursor.isNullOrBlank() || !state.searchHashtagsHasMore || state.isSearchHashtagsLoadingMore) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSearchHashtagsLoadingMore = true) }
+            val result = repo.searchHashtagsPage(query, cursor = cursor)
+            if (_uiState.value.searchQuery.trim() != query) return@launch
+            result.onSuccess { page ->
+                val existing = _uiState.value.searchHashtags.map { it.tag.lowercase() }.toHashSet()
+                val incoming = page.hashtags.filterNot { existing.contains(it.tag.lowercase()) }
+                val hasNext = page.hasMore && !page.nextCursor.isNullOrBlank()
+                _uiState.update { current ->
+                    current.copy(
+                        searchHashtags = current.searchHashtags + incoming,
+                        searchHashtagsNextCursor = if (hasNext) page.nextCursor else null,
+                        searchHashtagsHasMore = hasNext,
+                        isSearchHashtagsLoadingMore = false
+                    )
+                }
+            }.onFailure {
+                _uiState.update { it.copy(isSearchHashtagsLoadingMore = false) }
             }
         }
     }
