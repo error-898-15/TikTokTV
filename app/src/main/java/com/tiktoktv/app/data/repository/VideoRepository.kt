@@ -4,9 +4,11 @@ import com.tiktoktv.app.data.model.Author
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
 import com.tiktoktv.app.data.model.FeedPage
+import com.tiktoktv.app.data.model.HashtagsPage
 import com.tiktoktv.app.data.model.SearchSuggestion
 import com.tiktoktv.app.data.model.UnifiedSearchResult
 import com.tiktoktv.app.data.model.UserProfileResult
+import com.tiktoktv.app.data.model.UsersPage
 
 interface VideoRepository {
 
@@ -32,6 +34,16 @@ interface VideoRepository {
         query: String,
         cursor: String? = null
     ): Result<UnifiedSearchResult>
+
+    suspend fun searchUsersPage(
+        query: String,
+        cursor: String? = null
+    ): Result<UsersPage>
+
+    suspend fun searchHashtagsPage(
+        query: String,
+        cursor: String? = null
+    ): Result<HashtagsPage>
 
     suspend fun getSearchSuggestions(
         query: String
