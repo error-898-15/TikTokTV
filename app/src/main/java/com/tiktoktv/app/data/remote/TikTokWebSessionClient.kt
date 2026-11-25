@@ -263,7 +263,9 @@ class TikTokWebSessionClient(
         userIdHint: String = "",
         cursor: String = "0",
         count: Int = ScraperConfig.PROFILE_WEB_PAGE_SIZE,
-        forceReload: Boolean = false
+        forceReload: Boolean = false,
+        regionCode: String = "BD",
+        timeZone: String = "Asia/Dhaka"
     ): WebSessionPageResponse? = sessionMutex.withLock {
         val cleanUser = username.trim().removePrefix("@")
         if (cleanUser.isBlank()) return@withLock null
@@ -272,7 +274,7 @@ class TikTokWebSessionClient(
         val preferDesktop = if (!isInitialPage && currentUsername.equals(cleanUser, ignoreCase = true)) {
             currentUseDesktopUa
         } else {
-            false
+            true
         }
 
         val firstAttempt = executeFetchUserPostsLocked(
@@ -282,26 +284,30 @@ class TikTokWebSessionClient(
             cursor = cursor,
             count = count,
             forceReload = forceReload,
-            useDesktopUa = preferDesktop
+            useDesktopUa = preferDesktop,
+            regionCode = regionCode,
+            timeZone = timeZone
         )
 
-        if (isInitialPage && !preferDesktop && !hasNonEmptyItemList(firstAttempt?.rawApiJson)) {
-            val desktopAttempt = executeFetchUserPostsLocked(
+        if (isInitialPage && !hasNonEmptyItemList(firstAttempt?.rawApiJson)) {
+            val altAttempt = executeFetchUserPostsLocked(
                 cleanUser = cleanUser,
                 secUidHint = firstAttempt?.secUid?.ifBlank { secUidHint } ?: secUidHint,
                 userIdHint = firstAttempt?.userId?.ifBlank { userIdHint } ?: userIdHint,
                 cursor = cursor,
                 count = count,
                 forceReload = true,
-                useDesktopUa = true
+                useDesktopUa = !preferDesktop,
+                regionCode = regionCode,
+                timeZone = timeZone
             )
-            if (desktopAttempt != null &&
-                (hasNonEmptyItemList(desktopAttempt.rawApiJson) || desktopAttempt.domVideoRefs.isNotEmpty())
+            if (altAttempt != null &&
+                (hasNonEmptyItemList(altAttempt.rawApiJson) || altAttempt.domVideoRefs.isNotEmpty())
             ) {
-                return@withLock desktopAttempt
+                return@withLock altAttempt
             }
             if (firstAttempt != null) return@withLock firstAttempt
-            return@withLock desktopAttempt
+            return@withLock altAttempt
         }
 
         return@withLock firstAttempt
@@ -397,9 +403,11 @@ class TikTokWebSessionClient(
         cursor: String,
         count: Int,
         forceReload: Boolean,
-        useDesktopUa: Boolean
+        useDesktopUa: Boolean,
+        regionCode: String,
+        timeZone: String
     ): WebSessionPageResponse? {
-        val ready = ensureProfileSessionLocked(cleanUser, forceReload, useDesktopUa)
+        val ready = ensureProfileSessionLocked(cleanUser, forceReload, useDesktopUa, regionCode)
         if (!ready && secUidHint.isBlank()) {
             return if (currentDomRefs.isNotEmpty() || currentUserDetailJson.isNotBlank()) {
                 WebSessionPageResponse(
@@ -439,7 +447,9 @@ class TikTokWebSessionClient(
                 capturedTemplateJson = capturedJson,
                 fallbackSdkUrl = ScraperConfig.WEBMSSDK_FALLBACK_URL,
                 isDesktopUa = useDesktopUa,
-                allowCapturedFirstPage = !forceReload
+                allowCapturedFirstPage = !forceReload,
+                regionCode = regionCode,
+                timeZone = timeZone
             ),
             timeoutMs = ScraperConfig.WEB_SESSION_TIMEOUT_MS,
             useDesktopUa = useDesktopUa
@@ -493,7 +503,8 @@ class TikTokWebSessionClient(
     private suspend fun ensureProfileSessionLocked(
         cleanUser: String,
         forceReload: Boolean,
-        useDesktopUa: Boolean
+        useDesktopUa: Boolean,
+        regionCode: String = "BD"
     ): Boolean {
         if (!forceReload &&
             currentPageReady &&
@@ -521,6 +532,10 @@ class TikTokWebSessionClient(
         withContext(Dispatchers.Main) {
             pageLoadDeferred = null
             view.stopLoading()
+            view.evaluateJavascript(
+                "window.__TT_CAPTURED_FIRST_POST_PAGE='';window.__TT_CAPTURED_POST_URL='';",
+                null
+            )
             pageLoadDeferred = deferred
             view.loadUrl(targetUrl)
         }
@@ -529,7 +544,7 @@ class TikTokWebSessionClient(
         pageLoadDeferred = null
 
         var readyJson = evalAsyncJs(
-            scriptBody = buildWaitForContextScript(ScraperConfig.WEBMSSDK_FALLBACK_URL),
+            scriptBody = buildWaitForContextScript(ScraperConfig.WEBMSSDK_FALLBACK_URL, regionCode),
             timeoutMs = 10_000L,
             useDesktopUa = useDesktopUa
         )
@@ -537,7 +552,7 @@ class TikTokWebSessionClient(
         if (readyJson.isNullOrBlank()) {
             delay(1_200L)
             readyJson = evalAsyncJs(
-                scriptBody = buildWaitForContextScript(ScraperConfig.WEBMSSDK_FALLBACK_URL),
+                scriptBody = buildWaitForContextScript(ScraperConfig.WEBMSSDK_FALLBACK_URL, regionCode),
                 timeoutMs = 9_000L,
                 useDesktopUa = useDesktopUa
             )
@@ -658,9 +673,9 @@ class TikTokWebSessionClient(
         const collectDomRefs = () => {
           const out = [];
           const seen = new Set();
-          const rx = /\/@([A-Za-z0-9._]+)\/video\/(\d{15,22})/g;
+          const rx = /\/@([A-Za-z0-9._]+)\/(?:video|photo)\/(\d{15,22})/g;
           try {
-            document.querySelectorAll('a[href*="/video/"]').forEach(a => {
+            document.querySelectorAll('a[href*="/video/"], a[href*="/photo/"]').forEach(a => {
               const href = a.getAttribute('href') || a.href || '';
               rx.lastIndex = 0;
               const m = rx.exec(href);
@@ -854,20 +869,23 @@ class TikTokWebSessionClient(
         };
     """.trimIndent()
 
-    private fun buildWaitForContextScript(fallbackSdkUrl: String): String = """
+    private fun buildWaitForContextScript(
+        fallbackSdkUrl: String,
+        regionCode: String = "BD"
+    ): String = """
         $NETWORK_SNIFFER_BOOTSTRAP_JS
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         const collectDomRefs = () => {
           const out = [];
           const seen = new Set();
-          const rx = /\/@([A-Za-z0-9._]+)\/video\/(\d{15,22})/g;
+          const rx = /\/@([A-Za-z0-9._]+)\/(?:video|photo)\/(\d{15,22})/g;
           const add = (u, id) => {
             if (!u || !id || seen.has(id)) return;
             seen.add(id);
             out.push({ u, id });
           };
           try {
-            document.querySelectorAll('a[href*="/video/"]').forEach(a => {
+            document.querySelectorAll('a[href*="/video/"], a[href*="/photo/"]').forEach(a => {
               const href = a.getAttribute('href') || a.href || '';
               rx.lastIndex = 0;
               const m = rx.exec(href);
@@ -918,6 +936,9 @@ class TikTokWebSessionClient(
           if (result.secUid && (hasCapturedPage || (mssdkReady && waitedEnoughAfterSecUid))) {
             break;
           }
+          if (result.secUid && i === 12 && !hasCapturedPage) {
+            try { window.scrollBy(0, 450); } catch (e) {}
+          }
 
           if (i === 14 && !mssdkReady && !sdkInjected) {
             sdkInjected = true;
@@ -937,7 +958,7 @@ class TikTokWebSessionClient(
                         boe: false,
                         intercept: true,
                         enablePathList: ['/api/post/item_list/', '/api/post/item_list/v1/', '/api/creator/item_list/', '/api/challenge/item_list/', '/api/explore/item_list/'],
-                        region: 'US',
+                        region: ${JSONObject.quote(regionCode)},
                         isSDK: false
                       });
                       window.MSSDK_INITIALIZED = true;
@@ -962,21 +983,23 @@ class TikTokWebSessionClient(
         capturedTemplateJson: String,
         fallbackSdkUrl: String,
         isDesktopUa: Boolean,
-        allowCapturedFirstPage: Boolean
+        allowCapturedFirstPage: Boolean,
+        regionCode: String = "BD",
+        timeZone: String = "Asia/Dhaka"
     ): String = """
         $NETWORK_SNIFFER_BOOTSTRAP_JS
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         const collectDomRefs = () => {
           const out = [];
           const seen = new Set();
-          const rx = /\/@([A-Za-z0-9._]+)\/video\/(\d{15,22})/g;
+          const rx = /\/@([A-Za-z0-9._]+)\/(?:video|photo)\/(\d{15,22})/g;
           const add = (u, id) => {
             if (!u || !id || seen.has(id)) return;
             seen.add(id);
             out.push({ u, id });
           };
           try {
-            document.querySelectorAll('a[href*="/video/"]').forEach(a => {
+            document.querySelectorAll('a[href*="/video/"], a[href*="/photo/"]').forEach(a => {
               const href = a.getAttribute('href') || a.href || '';
               rx.lastIndex = 0;
               const m = rx.exec(href);
@@ -1039,7 +1062,7 @@ class TikTokWebSessionClient(
                         boe: false,
                         intercept: true,
                         enablePathList: ['/api/post/item_list/', '/api/post/item_list/v1/', '/api/creator/item_list/'],
-                        region: 'US',
+                        region: ${JSONObject.quote(regionCode)},
                         isSDK: false
                       });
                       window.MSSDK_INITIALIZED = true;
@@ -1094,11 +1117,11 @@ class TikTokWebSessionClient(
             os: ${if (isDesktopUa) "'windows'" else "'android'"},
             priority_region: '',
             referer: String(document.referrer || ''),
-            region: String(appCtx.region || 'US'),
+            region: String(appCtx.region || ${JSONObject.quote(regionCode)}),
             root_referer: String(document.referrer || ''),
             screen_height: String(screen.height || 1080),
             screen_width: String(screen.width || 1920),
-            tz_name: String((Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'America/New_York'),
+            tz_name: String((Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || ${JSONObject.quote(timeZone)}),
             user_is_login: 'false',
             webcast_language: String(appCtx.language || 'en')
           };
@@ -1162,11 +1185,6 @@ class TikTokWebSessionClient(
           } catch (e) {}
           return null;
         };
-
-        const creatorRes = await tryCreatorList();
-        if (creatorRes && hasItemsInJson(creatorRes.body)) {
-          return { status: creatorRes.status, body: creatorRes.body, domRefs: collectDomRefs() };
-        }
 
         const baseUrl = 'https://www.tiktok.com/api/post/item_list/';
         const tryFetch = async (qs) => {
@@ -1276,6 +1294,26 @@ class TikTokWebSessionClient(
           }
         }
 
+        if (!hasItemsInJson(res.body)) {
+          const creatorRes = await tryCreatorList();
+          if (creatorRes && hasItemsInJson(creatorRes.body)) {
+            res = creatorRes;
+          }
+        }
+
+        if (!hasItemsInJson(res.body) && ${JSONObject.quote(cursor)} === '0') {
+          try {
+            window.scrollBy(0, 1200);
+            for (let w = 0; w < 8; w++) {
+              await sleep(150);
+              if (hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE)) {
+                res = { status: 200, body: window.__TT_CAPTURED_FIRST_POST_PAGE };
+                break;
+              }
+            }
+          } catch (e) {}
+        }
+
         return { status: res.status, body: res.body || '', domRefs: collectDomRefs() };
     """.trimIndent()
 
@@ -1335,8 +1373,10 @@ class TikTokWebSessionClient(
                       window.__TT_CAPTURED_SEARCH_LIVE = text;
                     }
                   }
-                  if (Array.isArray(parsed.itemList) && parsed.itemList.length > 0) {
-                    if (!window.__TT_CAPTURED_FIRST_POST_PAGE) {
+                  if (url && isPostApi(url) && Array.isArray(parsed.itemList) && parsed.itemList.length > 0) {
+                    if (url.indexOf('/api/post/item_list/') !== -1) {
+                      window.__TT_CAPTURED_FIRST_POST_PAGE = text;
+                    } else if (!window.__TT_CAPTURED_FIRST_POST_PAGE) {
                       window.__TT_CAPTURED_FIRST_POST_PAGE = text;
                     }
                   }

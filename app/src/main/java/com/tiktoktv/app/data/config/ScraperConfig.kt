@@ -56,7 +56,7 @@ object ScraperConfig {
     const val SEARCH_PAGE_SIZE = 24
     const val CATEGORY_PAGE_SIZE = 15
     const val PROFILE_INITIAL_BATCH_SIZE = 30
-    const val PROFILE_CREATOR_PAGE_SIZE = 15
+    const val PROFILE_CREATOR_PAGE_SIZE = 30
     const val PROFILE_WEB_PAGE_SIZE = 35
     const val HYDRATION_CONCURRENCY = 5
     const val WEB_SESSION_TIMEOUT_MS = 22_000L
@@ -113,7 +113,7 @@ object ScraperConfig {
     const val SELECTOR_FOLLOWING_COUNT = "[data-e2e=following-count]"
     const val SELECTOR_FOLLOWERS_COUNT = "[data-e2e=followers-count]"
     const val SELECTOR_LIKES_COUNT = "[data-e2e=likes-count]"
-    const val SELECTOR_VIDEO_CARD_LINKS = "a[href*=/video/]"
+    const val SELECTOR_VIDEO_CARD_LINKS = "a[href*=/video/], a[href*=/photo/]"
 
     // Embedded JSON Keys
     const val JSON_KEY_DEFAULT_SCOPE = "__DEFAULT_SCOPE__"

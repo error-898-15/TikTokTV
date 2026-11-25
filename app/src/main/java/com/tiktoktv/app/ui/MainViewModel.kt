@@ -702,7 +702,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (step.newCount == 0) {
                     zeroNewStreak++
-                    if (zeroNewStreak >= 3) {
+                    if (zeroNewStreak >= 5) {
                         _uiState.update { it.copy(profileHasMore = false, profileNextCursor = null) }
                         break
                     }
@@ -747,6 +747,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.author.username.equals(cleanTarget, ignoreCase = true) ||
                         it.author.username.equals(res.author.username, ignoreCase = true) ||
                         it.author.username.equals(activeAuthorNow, ignoreCase = true) ||
+                        it.author.username == "creator" ||
+                        it.author.username.isBlank() ||
                         (activeSecUid.isNotBlank() && it.author.secUid == activeSecUid)
                 }
                 .filterNot { existingIds.contains(it.id) }
@@ -795,9 +797,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
 
-            if (!forceRefresh && result.getOrNull()?.videos.isNullOrEmpty()) {
+            val firstProf = result.getOrNull()
+            val needsForcedRetry = !forceRefresh && (
+                firstProf == null ||
+                    firstProf.videos.isEmpty() ||
+                    (firstProf.author.videoCount > 0L && firstProf.videos.size < firstProf.author.videoCount && !firstProf.hasMore)
+                )
+            if (needsForcedRetry) {
                 val retryResult = repo.getUserProfile(username, forceRefresh = true)
-                if (retryResult.isSuccess && !retryResult.getOrNull()?.videos.isNullOrEmpty()) {
+                val retryProf = retryResult.getOrNull()
+                if (retryResult.isSuccess && retryProf != null &&
+                    retryProf.videos.size > (firstProf?.videos?.size ?: 0)
+                ) {
                     result = retryResult
                 }
             }
@@ -1211,8 +1222,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.markVideosSeen(listOf(video.id))
         prefs.recordWatchHistory(video)
         val quality = _uiState.value.settings.videoQuality
-        playerManager.playVideo(video.resolveCandidateUrls(quality), autoplay = _uiState.value.settings.autoplay)
-        prefetchNextTwo(index)
+        if (video.isPhotoPost) {
+            playerManager.playPhotoAudio(video.audioUrl, autoplay = _uiState.value.settings.autoplay)
+        } else {
+            playerManager.playVideo(video.resolveCandidateUrls(quality), autoplay = _uiState.value.settings.autoplay)
+            prefetchNextTwo(index)
+        }
     }
 
     private fun prefetchNextTwo(index: Int) {

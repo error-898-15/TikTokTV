@@ -31,6 +31,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -121,6 +127,24 @@ fun HomeFeedScreen(
         }
         else -> {
             val video = uiState.currentVideo ?: return
+            var slideIndex by remember(video.id) { mutableIntStateOf(0) }
+            var isSlidePaused by remember(video.id) { mutableStateOf(!uiState.settings.autoplay) }
+            val activeSlideUrl = if (video.isPhotoPost) {
+                video.imageUrls.getOrElse(slideIndex.coerceIn(0, (video.imageUrls.size - 1).coerceAtLeast(0))) {
+                    video.coverUrl
+                }
+            } else {
+                video.coverUrl
+            }
+
+            LaunchedEffect(video.id, isSlidePaused, video.imageUrls.size) {
+                if (video.isPhotoPost && video.imageUrls.size > 1 && !isSlidePaused) {
+                    while (true) {
+                        delay(3500L)
+                        slideIndex = (slideIndex + 1) % video.imageUrls.size
+                    }
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -128,7 +152,7 @@ fun HomeFeedScreen(
                     .background(TikTokColors.Black)
             ) {
                 BlurredVideoBackdrop(
-                    coverUrl = video.coverUrl,
+                    coverUrl = activeSlideUrl,
                     backdropPlayer = playerManager.backdropPlayer,
                     backdropFailed = backdropFailed
                 )
@@ -154,6 +178,9 @@ fun HomeFeedScreen(
                                     true
                                 }
                                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlayPause, Key.Spacebar -> {
+                                    if (video.isPhotoPost) {
+                                        isSlidePaused = !isSlidePaused
+                                    }
                                     onTogglePlayPause()
                                     true
                                 }
@@ -176,66 +203,114 @@ fun HomeFeedScreen(
                             .aspectRatio(9f / 16f),
                         contentAlignment = Alignment.Center
                     ) {
-                        // Show crisp video cover behind PlayerView until first video frame renders
-                        if (!hasRenderedFirstFrame && video.coverUrl.isNotBlank()) {
+                        if (video.isPhotoPost) {
                             AsyncImage(
-                                model = video.coverUrl,
+                                model = activeSlideUrl,
                                 contentDescription = video.caption,
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()
                             )
-                        }
-
-                        AndroidView(
-                            modifier = Modifier.fillMaxSize(),
-                            factory = { ctx ->
-                                (LayoutInflater.from(ctx)
-                                    .inflate(R.layout.view_texture_player, null, false) as PlayerView).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
+                            if (video.imageUrls.size > 1) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(top = 24.dp, end = 16.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(Color.Black.copy(alpha = 0.58f))
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "${slideIndex + 1} / ${video.imageUrls.size}",
+                                        color = TikTokColors.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
                                     )
-                                    useController = false
-                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                    setKeepContentOnPlayerReset(false)
-                                    player = playerManager.mainPlayer
-                                    isFocusable = false
-                                    isFocusableInTouchMode = false
-                                    keepScreenOn = isPlaying
                                 }
-                            },
-                            update = { view ->
-                                if (view.player !== playerManager.mainPlayer) {
-                                    view.player = playerManager.mainPlayer
+                                Row(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 22.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(Color.Black.copy(alpha = 0.45f))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    video.imageUrls.forEachIndexed { idx, _ ->
+                                        Box(
+                                            modifier = Modifier
+                                                .size(if (idx == slideIndex) 8.dp else 6.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (idx == slideIndex) TikTokColors.White
+                                                    else TikTokColors.White.copy(alpha = 0.45f)
+                                                )
+                                        )
+                                    }
                                 }
-                                view.keepScreenOn = isPlaying
-                            },
-                            onRelease = { view ->
-                                view.keepScreenOn = false
-                                view.player = null
                             }
-                        )
-
-                        if (isBuffering && playbackError == null) {
-                            CircularProgressIndicator(
-                                color = TikTokColors.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(42.dp)
-                            )
-                        }
-
-                        if (playbackError != null) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Black.copy(alpha = 0.72f))
-                                    .padding(horizontal = 18.dp, vertical = 10.dp)
-                            ) {
-                                Text(
-                                    text = "Video stream unavailable — press RIGHT for next",
-                                    color = TikTokColors.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium
+                        } else {
+                            // Show crisp video cover behind PlayerView until first video frame renders
+                            if (!hasRenderedFirstFrame && video.coverUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = video.coverUrl,
+                                    contentDescription = video.caption,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
                                 )
+                            }
+
+                            AndroidView(
+                                modifier = Modifier.fillMaxSize(),
+                                factory = { ctx ->
+                                    (LayoutInflater.from(ctx)
+                                        .inflate(R.layout.view_texture_player, null, false) as PlayerView).apply {
+                                        layoutParams = ViewGroup.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                        useController = false
+                                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                        setKeepContentOnPlayerReset(false)
+                                        player = playerManager.mainPlayer
+                                        isFocusable = false
+                                        isFocusableInTouchMode = false
+                                        keepScreenOn = isPlaying
+                                    }
+                                },
+                                update = { view ->
+                                    if (view.player !== playerManager.mainPlayer) {
+                                        view.player = playerManager.mainPlayer
+                                    }
+                                    view.keepScreenOn = isPlaying
+                                },
+                                onRelease = { view ->
+                                    view.keepScreenOn = false
+                                    view.player = null
+                                }
+                            )
+
+                            if (isBuffering && playbackError == null) {
+                                CircularProgressIndicator(
+                                    color = TikTokColors.White.copy(alpha = 0.85f),
+                                    modifier = Modifier.size(42.dp)
+                                )
+                            }
+
+                            if (playbackError != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color.Black.copy(alpha = 0.72f))
+                                        .padding(horizontal = 18.dp, vertical = 10.dp)
+                                ) {
+                                    Text(
+                                        text = "Video stream unavailable — press RIGHT for next",
+                                        color = TikTokColors.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                             }
                         }
 

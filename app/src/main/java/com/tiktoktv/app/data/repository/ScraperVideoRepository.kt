@@ -65,6 +65,7 @@ class ScraperVideoRepository(
     private val authorVideoMap = ConcurrentHashMap<String, MutableMap<String, VideoItem>>()
     private val blockedEndpointsUntil = ConcurrentHashMap<String, Long>()
     private val pendingProfileRefs = ConcurrentHashMap<String, List<Pair<String, String>>>()
+    private val profileFallbackQueues = ConcurrentHashMap<String, ArrayDeque<String>>()
     private val categoryRefPools = ConcurrentHashMap<String, List<Pair<String, String>>>()
     private val secUidByUsername = ConcurrentHashMap<String, String>()
     private val userIdByUsername = ConcurrentHashMap<String, String>()
@@ -1258,8 +1259,18 @@ class ScraperVideoRepository(
         forceRefresh: Boolean
     ): Result<UserProfileResult> = withContext(Dispatchers.IO) {
         val cleanUser = username.trim().removePrefix("@")
-        val cacheKey = "profile_v5_${cleanUser.lowercase()}_${cursor ?: "0"}"
-        if (!forceRefresh) {
+        val cacheKey = "profile_v6_${cleanUser.lowercase()}_${cursor ?: "0"}"
+        if (!forceRefresh && cursor.isNullOrBlank()) {
+            readCachedProfile(cacheKey)?.let { profile ->
+                val expectedTotal = profile.author.videoCount
+                val looksComplete = profile.videos.isNotEmpty() &&
+                    (expectedTotal <= 0L || profile.videos.size >= expectedTotal || profile.hasMore)
+                if (looksComplete) {
+                    indexVideos(profile.videos)
+                    return@withContext Result.success(profile)
+                }
+            }
+        } else if (!forceRefresh) {
             readCachedProfile(cacheKey)?.let { profile ->
                 if (profile.videos.isNotEmpty()) {
                     indexVideos(profile.videos)
@@ -1273,7 +1284,10 @@ class ScraperVideoRepository(
             val profile = fetchUserProfileInternal(cleanUser, cursor, forceNetwork = forceRefresh)
                 ?: throw ScraperException(noVideosMessage("Unable to load profile @$cleanUser."))
             indexVideos(profile.videos)
-            if (profile.videos.isNotEmpty()) {
+            val expectedTotal = profile.author.videoCount
+            val shouldCache = profile.videos.isNotEmpty() &&
+                (cursor != null || expectedTotal <= 0L || profile.videos.size >= expectedTotal || profile.hasMore)
+            if (shouldCache) {
                 saveCachedProfile(cacheKey, profile)
             }
             profile
@@ -1289,6 +1303,19 @@ class ScraperVideoRepository(
         }
     }
 
+    private fun popNextProfileStage(keyLower: String, finishedCursor: String? = null): String? {
+        val queue = profileFallbackQueues[keyLower] ?: return null
+        synchronized(queue) {
+            while (queue.isNotEmpty()) {
+                val candidate = queue.removeFirst()
+                if (candidate.isNotBlank() && candidate != finishedCursor) {
+                    return candidate
+                }
+            }
+            return null
+        }
+    }
+
     private suspend fun fetchUserProfileInternal(
         username: String,
         cursor: String?,
@@ -1297,6 +1324,7 @@ class ScraperVideoRepository(
         val clean = username.trim().removePrefix("@")
         val keyLower = clean.lowercase()
         val hintAuthor = authorHintByUsername[keyLower]
+        val activeRegion = prefs.getSettings().contentRegion
 
         // 0. Paginate all uploaded creator videos via direct TikTok /api/creator/item_list/
         if (!cursor.isNullOrBlank() && cursor.startsWith("creator:")) {
@@ -1359,11 +1387,12 @@ class ScraperVideoRepository(
                     } else item
                 }
                 val hasNext = page.hasMore && !page.nextCursor.isNullOrBlank() && page.nextCursor != creatorCursor
+                val nextStage = if (hasNext) "creator:${page.nextCursor}" else popNextProfileStage(keyLower, cursor)
                 return@coroutineScope UserProfileResult(
                     author = resolvedAuthor,
                     videos = fixedVideos,
-                    nextCursor = if (hasNext) "creator:${page.nextCursor}" else null,
-                    hasMore = hasNext
+                    nextCursor = nextStage,
+                    hasMore = nextStage != null
                 )
             }
 
@@ -1375,7 +1404,9 @@ class ScraperVideoRepository(
                     userIdHint = userIdByUsername[keyLower].orEmpty(),
                     cursor = creatorCursor,
                     count = ScraperConfig.PROFILE_CREATOR_PAGE_SIZE,
-                    forceReload = false
+                    forceReload = false,
+                    regionCode = activeRegion.code,
+                    timeZone = activeRegion.timeZone
                 )
             }.getOrNull()
             val fallbackRoot = fallbackResp?.rawApiJson?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
@@ -1388,13 +1419,13 @@ class ScraperVideoRepository(
             val hasMorePrevFb = fallbackRoot?.optBoolean("hasMorePrevious", false) == true
             val hasMorePostFb = fallbackRoot?.optBoolean("hasMore", false) == true
             val nextPrefixCursor = when {
-                hasMorePrevFb && minFallbackSec != null -> {
+                fallbackVideos.isNotEmpty() && hasMorePrevFb && minFallbackSec != null -> {
                     val ms = (minFallbackSec * 1000L).toString()
                     if (ms != creatorCursor) "creator:$ms" else null
                 }
-                hasMorePostFb && nextCursorApi.isNotBlank() && nextCursorApi != creatorCursor ->
+                fallbackVideos.isNotEmpty() && hasMorePostFb && nextCursorApi.isNotBlank() && nextCursorApi != creatorCursor ->
                     "wv:$nextCursorApi"
-                else -> null
+                else -> popNextProfileStage(keyLower, cursor)
             }
             val fbAuthor = fallbackVideos.firstOrNull { it.author.username != "creator" }?.author
                 ?: hintAuthor
@@ -1406,8 +1437,8 @@ class ScraperVideoRepository(
                         item.copy(author = fbAuthor)
                     } else item
                 },
-                nextCursor = if (fallbackVideos.isNotEmpty()) nextPrefixCursor else null,
-                hasMore = fallbackVideos.isNotEmpty() && nextPrefixCursor != null
+                nextCursor = nextPrefixCursor,
+                hasMore = nextPrefixCursor != null
             )
         }
 
@@ -1422,7 +1453,9 @@ class ScraperVideoRepository(
                 userIdHint = cachedUserId,
                 cursor = wvCursor,
                 count = ScraperConfig.PROFILE_WEB_PAGE_SIZE,
-                forceReload = false
+                forceReload = false,
+                regionCode = activeRegion.code,
+                timeZone = activeRegion.timeZone
             )
             var root = resp?.rawApiJson?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
             var itemArray = root?.optJSONArray("itemList")
@@ -1433,7 +1466,9 @@ class ScraperVideoRepository(
                     userIdHint = cachedUserId,
                     cursor = wvCursor,
                     count = ScraperConfig.PROFILE_WEB_PAGE_SIZE,
-                    forceReload = true
+                    forceReload = true,
+                    regionCode = activeRegion.code,
+                    timeZone = activeRegion.timeZone
                 )
                 root = resp?.rawApiJson?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
                 itemArray = root?.optJSONArray("itemList")
@@ -1467,7 +1502,8 @@ class ScraperVideoRepository(
 
             val apiHasMore = root?.optBoolean("hasMore", false) ?: false
             val nextRawCursor = root?.optCleanString("cursor").orEmpty()
-            val hasNext = apiHasMore && nextRawCursor.isNotBlank() && nextRawCursor != wvCursor
+            val hasNextWeb = parsedVideosRaw.isNotEmpty() && apiHasMore && nextRawCursor.isNotBlank() && nextRawCursor != wvCursor
+            val nextStage = if (hasNextWeb) "wv:$nextRawCursor" else popNextProfileStage(keyLower, cursor)
 
             val resolvedAuthor = parsedVideosRaw.firstOrNull { it.author.username != "creator" }?.author
                 ?: parsedAuthor
@@ -1487,12 +1523,12 @@ class ScraperVideoRepository(
             return@coroutineScope UserProfileResult(
                 author = resolvedAuthor,
                 videos = parsedVideos,
-                nextCursor = if (hasNext) "wv:$nextRawCursor" else null,
-                hasMore = hasNext
+                nextCursor = nextStage,
+                hasMore = nextStage != null
             )
         }
 
-        // 2. Fallback pagination of pending SSR/embed video refs
+        // 2. Fallback pagination of pending SSR/embed/DOM video refs
         if (!cursor.isNullOrBlank() && cursor.startsWith("refs_")) {
             val offset = cursor.removePrefix("refs_").toIntOrNull() ?: 0
             val allRefs = pendingProfileRefs[keyLower].orEmpty()
@@ -1500,6 +1536,7 @@ class ScraperVideoRepository(
             val videos = if (slice.isNotEmpty()) hydrateVideoRefs(slice) else emptyList()
             val nextOffset = offset + slice.size
             val hasMoreRefs = slice.isNotEmpty() && nextOffset < allRefs.size
+            val nextStage = if (hasMoreRefs) "refs_$nextOffset" else popNextProfileStage(keyLower, cursor)
             val author = videos.firstOrNull()?.author ?: hintAuthor ?: Author(
                 id = clean,
                 username = clean,
@@ -1508,34 +1545,46 @@ class ScraperVideoRepository(
             return@coroutineScope UserProfileResult(
                 author = author,
                 videos = videos,
-                nextCursor = if (hasMoreRefs) "refs_$nextOffset" else null,
-                hasMore = hasMoreRefs
+                nextCursor = nextStage,
+                hasMore = nextStage != null
             )
         }
 
         // 3. Fallback pagination via mirror API if available on the user's network
         if (!cursor.isNullOrBlank() && cursor.startsWith("mirror:")) {
             val mirrorCursor = cursor.removePrefix("mirror:")
-            val page = fetchUserPostsMirror(clean, mirrorCursor)
-            val ownVideos = page.videos.filter {
-                it.author.username.equals(clean, ignoreCase = true)
+            val cachedSecUid = secUidByUsername[keyLower] ?: hintAuthor?.secUid.orEmpty()
+            val page = fetchUserPostsMirror(clean, mirrorCursor, secUid = cachedSecUid)
+            val allowed = canonicalUsernameByQuery[keyLower].orEmpty() + clean
+            val ownVideos = page.videos.filter { v ->
+                allowed.any { it.equals(v.author.username, ignoreCase = true) } ||
+                    (cachedSecUid.isNotBlank() && v.author.secUid == cachedSecUid) ||
+                    v.author.username == "creator"
             }
-            val author = ownVideos.firstOrNull()?.author ?: hintAuthor ?: Author(
+            val author = ownVideos.firstOrNull { it.author.username != "creator" }?.author ?: hintAuthor ?: Author(
                 id = clean,
                 username = clean,
-                displayName = clean
+                displayName = clean,
+                secUid = cachedSecUid
             )
+            val hasNextMirror = page.hasMore && !page.nextCursor.isNullOrBlank() && page.nextCursor != mirrorCursor && ownVideos.isNotEmpty()
+            val nextStage = if (hasNextMirror) "mirror:${page.nextCursor}" else popNextProfileStage(keyLower, cursor)
             return@coroutineScope UserProfileResult(
                 author = author,
-                videos = ownVideos,
-                nextCursor = page.nextCursor?.let { "mirror:$it" },
-                hasMore = page.hasMore && !page.nextCursor.isNullOrBlank() && ownVideos.isNotEmpty()
+                videos = ownVideos.map { item ->
+                    if (item.author.username == "creator" || item.author.avatarUrl.isBlank()) {
+                        item.copy(author = author)
+                    } else item
+                },
+                nextCursor = nextStage,
+                hasMore = nextStage != null
             )
         }
 
         // Initial profile load (cursor == null):
-        // Fast parallel OkHttp path: HTML userInfo (secUid) + /embed/@user.
-        // If secUid is already known (e.g. opened from HomeFeed or Search), also fetch /api/creator/item_list/ immediately in parallel!
+        // Run HTML SSR + /embed/@user + tikwm /user/info + tikwm /user/posts (and /api/creator/item_list/ if secUid known) in parallel!
+        profileFallbackQueues.remove(keyLower)
+        pendingProfileRefs.remove(keyLower)
         val compactTag = clean.lowercase().replace(Regex("[^\\p{L}0-9_]"), "")
         val profileUrl = ScraperConfig.TIKTOK_PROFILE_URL_TEMPLATE.format(urlEncode(clean))
         val preknownSecUid = secUidByUsername[keyLower]
@@ -1563,16 +1612,26 @@ class ScraperVideoRepository(
         val embedProfileDeferred = async {
             runCatching { fetchEmbedProfilePage(clean, forceNetwork = forceNetwork) }.getOrNull()
         }
+        val userInfoMirrorDeferred = async {
+            runCatching { fetchUserInfoMirror(clean, secUid = preknownSecUid) }.getOrNull()
+        }
+        val mirrorPostsDeferred = async {
+            fetchUserPostsMirror(clean, null, secUid = preknownSecUid)
+        }
 
         val htmlProfile = htmlProfileDeferred.await()
         val embedProfile = embedProfileDeferred.await()
+        val mirrorUserInfo = userInfoMirrorDeferred.await()
+        var postsPage = mirrorPostsDeferred.await()
 
         var resolvedSecUid = preknownSecUid
             .ifBlank { htmlProfile?.author?.secUid.orEmpty() }
+            .ifBlank { mirrorUserInfo?.secUid.orEmpty() }
             .ifBlank { embedProfile?.secUid.orEmpty() }
             .ifBlank { secUidByUsername[keyLower].orEmpty() }
 
         val resolvedUserId = (htmlProfile?.author?.id?.takeIf { !it.equals(clean, ignoreCase = true) } ?: "")
+            .ifBlank { mirrorUserInfo?.id?.takeIf { !it.equals(clean, ignoreCase = true) }.orEmpty() }
             .ifBlank { embedProfile?.author?.id?.takeIf { !it.equals(clean, ignoreCase = true) }.orEmpty() }
             .ifBlank { hintAuthor?.id?.takeIf { !it.equals(clean, ignoreCase = true) }.orEmpty() }
             .ifBlank { userIdByUsername[keyLower].orEmpty() }
@@ -1582,6 +1641,10 @@ class ScraperVideoRepository(
         }
         if (resolvedUserId.isNotBlank()) {
             userIdByUsername[keyLower] = resolvedUserId
+        }
+
+        if (postsPage.videos.isEmpty() && resolvedSecUid.isNotBlank() && resolvedSecUid != preknownSecUid) {
+            postsPage = fetchUserPostsMirror(clean, null, secUid = resolvedSecUid)
         }
 
         // Fetch /api/creator/item_list/ using resolved secUid if not already fetched in parallel above
@@ -1599,6 +1662,7 @@ class ScraperVideoRepository(
         }
 
         val fastCanonicalHandle = htmlProfile?.author?.username?.takeIf { it.isNotBlank() }
+            ?: mirrorUserInfo?.username?.takeIf { it.isNotBlank() }
             ?: embedProfile?.author?.username?.takeIf { it.isNotBlank() }
             ?: hintAuthor?.username?.takeIf { it.isNotBlank() }
             ?: ""
@@ -1619,28 +1683,43 @@ class ScraperVideoRepository(
                 (resolvedSecUid.isNotBlank() && v.author.secUid == resolvedSecUid) ||
                 v.author.username == "creator"
         }
+        val initialMirrorVideos = postsPage.videos.filter { v ->
+            fastAllowed.any { it.equals(v.author.username, ignoreCase = true) } ||
+                (resolvedSecUid.isNotBlank() && v.author.secUid == resolvedSecUid) ||
+                v.author.username == "creator"
+        }
 
-        // Only launch slow fallback requests (Googlebot SSR, tikwm mirror, tag SSR, WebView)
-        // when the fast direct TikTok creator API & HTML profile returned 0 videos.
-        val needSlowFallback = creatorVideos.isEmpty() && htmlOwnVideos.isEmpty()
+        val expectedFastVideoCount = maxOf(
+            htmlProfile?.author?.videoCount ?: 0L,
+            mirrorUserInfo?.videoCount ?: 0L,
+            hintAuthor?.videoCount ?: 0L,
+            embedProfile?.author?.videoCount ?: 0L
+        )
+        val preliminaryUniqueCount = (creatorVideos + initialMirrorVideos + htmlOwnVideos).distinctBy { it.id }.size
+        val hasActivePaginationSoFar = (creatorPage?.hasMore == true && creatorVideos.isNotEmpty()) ||
+            (postsPage.hasMore && initialMirrorVideos.isNotEmpty())
+
+        // Run Googlebot SSR + signed WebView /api/post/item_list/ if initial sources returned 0 videos OR came up short without more pages
+        val needWebFallback = preliminaryUniqueCount == 0 ||
+            (!hasActivePaginationSoFar && (
+                (expectedFastVideoCount > 0L && preliminaryUniqueCount < expectedFastVideoCount) ||
+                    preliminaryUniqueCount < 10
+                ))
+
         var gbData: GooglebotProfileData? = null
         var matchedSearchAuthor: Author? = null
-        var postsPage = FeedPage(emptyList(), null, false)
         var tagOwnRefs: List<Pair<String, String>> = emptyList()
         var webResp: WebSessionPageResponse? = null
 
-        if (needSlowFallback) {
+        if (needWebFallback) {
             val gbMobileProfileDeferred = async {
                 runCatching { fetchGooglebotProfilePage(profileUrl, clean, forceNetwork) }.getOrNull()
             }
             val userSearchDeferred = async {
-                fetchUserSearchApi(clean, count = 5)
-            }
-            val postsDeferred = async {
-                fetchUserPostsMirror(clean, null)
+                if (resolvedSecUid.isBlank()) fetchUserSearchApi(clean, count = 10) else emptyList()
             }
             val tagOwnRefsDeferred = async {
-                if (compactTag.isNotBlank()) {
+                if (preliminaryUniqueCount == 0 && compactTag.isNotBlank()) {
                     fetchTagRefsFromHtml(
                         ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format(urlEncode(compactTag)),
                         forceNetwork = forceNetwork
@@ -1652,8 +1731,7 @@ class ScraperVideoRepository(
             val searchedUsers = userSearchDeferred.await()
             matchedSearchAuthor = searchedUsers.firstOrNull {
                 it.username.equals(clean, ignoreCase = true)
-            } ?: searchedUsers.firstOrNull()
-            postsPage = postsDeferred.await()
+            }
             tagOwnRefs = tagOwnRefsDeferred.await()
 
             if (resolvedSecUid.isBlank() && !matchedSearchAuthor?.secUid.isNullOrBlank()) {
@@ -1674,17 +1752,28 @@ class ScraperVideoRepository(
                         v.author.username == "creator" ||
                         v.author.secUid.isBlank()
                 }
+                if (postsPage.videos.isEmpty()) {
+                    postsPage = fetchUserPostsMirror(clean, null, secUid = resolvedSecUid)
+                }
             }
 
-            if (creatorVideos.isEmpty() && postsPage.videos.isEmpty()) {
+            val updatedCount = (creatorVideos + postsPage.videos + htmlOwnVideos).distinctBy { it.id }.size
+            val updatedExpected = maxOf(expectedFastVideoCount, gbData?.author?.videoCount ?: 0L)
+            val stillShort = updatedCount == 0 ||
+                (updatedExpected > 0L && updatedCount < updatedExpected && !postsPage.hasMore && creatorPage?.hasMore != true) ||
+                (updatedCount < 10 && !postsPage.hasMore && creatorPage?.hasMore != true)
+
+            if (stillShort) {
                 webResp = runCatching {
                     webSessionClient.fetchUserPostsPage(
                         username = clean,
                         secUidHint = resolvedSecUid,
                         userIdHint = resolvedUserId,
                         cursor = "0",
-                        count = ScraperConfig.PROFILE_CREATOR_PAGE_SIZE,
-                        forceReload = forceNetwork
+                        count = ScraperConfig.PROFILE_WEB_PAGE_SIZE,
+                        forceReload = forceNetwork,
+                        regionCode = activeRegion.code,
+                        timeZone = activeRegion.timeZone
                     )
                 }.getOrNull()
             }
@@ -1700,16 +1789,18 @@ class ScraperVideoRepository(
             .toSet()
         canonicalUsernameByQuery[keyLower] = allowedUsernames
 
-        val mirrorOwnVideos = postsPage.videos.filter { v ->
-            allowedUsernames.any { it.equals(v.author.username, ignoreCase = true) } ||
-                (resolvedSecUid.isNotBlank() && v.author.secUid == resolvedSecUid)
-        }
-
         if (webResp != null && webResp.secUid.isNotBlank()) {
+            resolvedSecUid = resolvedSecUid.ifBlank { webResp.secUid }
             secUidByUsername[keyLower] = webResp.secUid
         }
         if (webResp != null && webResp.userId.isNotBlank()) {
             userIdByUsername[keyLower] = webResp.userId
+        }
+
+        val mirrorOwnVideos = postsPage.videos.filter { v ->
+            allowedUsernames.any { it.equals(v.author.username, ignoreCase = true) } ||
+                (resolvedSecUid.isNotBlank() && v.author.secUid == resolvedSecUid) ||
+                v.author.username == "creator"
         }
 
         val webRoot = webResp?.rawApiJson?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
@@ -1757,10 +1848,36 @@ class ScraperVideoRepository(
         }
         val allOwnRefs = combinedOwnRefs.values.toList()
 
-        // Hydrate /embed/ or SSR/DOM refs when primary feeds returned empty
-        val directIds = (creatorVideos + webOwnVideos + mirrorOwnVideos + htmlOwnVideos).map { it.id }.toSet()
+        val firstVideoAuthor = (
+            webOwnVideos.firstOrNull { it.author.username != "creator" }
+                ?: mirrorOwnVideos.firstOrNull { it.author.username != "creator" }
+                ?: creatorVideos.firstOrNull { it.author.username != "creator" }
+                ?: htmlOwnVideos.firstOrNull()
+            )?.author
+
+        val baseAuthor = mirrorUserInfo
+            ?: htmlProfile?.author
+            ?: webAuthor
+            ?: embedProfile?.author
+            ?: hintAuthor
+            ?: gbData?.author
+            ?: matchedSearchAuthor
+            ?: Author(id = clean, username = canonicalHandle.ifBlank { clean }, displayName = clean)
+
+        val preliminaryVideoCount = maxOf(
+            mirrorUserInfo?.videoCount ?: 0L,
+            htmlProfile?.author?.videoCount ?: 0L,
+            webAuthor?.videoCount ?: 0L,
+            firstVideoAuthor?.videoCount ?: 0L,
+            baseAuthor.videoCount,
+            gbData?.author?.videoCount ?: 0L
+        )
+
+        // Hydrate /embed/ or SSR/DOM refs whenever primary feeds returned empty OR fewer posts than author.videoCount
+        val directIds = (webOwnVideos + mirrorOwnVideos + creatorVideos + htmlOwnVideos).map { it.id }.toSet()
         val missingOwnRefs = allOwnRefs.filterNot { directIds.contains(it.second) }
-        val shouldHydrateRefs = missingOwnRefs.isNotEmpty() && directIds.isEmpty()
+        val shouldHydrateRefs = missingOwnRefs.isNotEmpty() &&
+            (directIds.isEmpty() || (preliminaryVideoCount > 0L && directIds.size < preliminaryVideoCount) || directIds.size < 10)
         val hydratedOwnVideos = if (shouldHydrateRefs) {
             val initialBatchRefs = missingOwnRefs.take(ScraperConfig.PROFILE_INITIAL_BATCH_SIZE)
             if (missingOwnRefs.size > ScraperConfig.PROFILE_INITIAL_BATCH_SIZE) {
@@ -1774,78 +1891,69 @@ class ScraperVideoRepository(
             emptyList()
         }
 
-        val firstVideoAuthor = (
-            creatorVideos.firstOrNull { it.author.username != "creator" }
-                ?: webOwnVideos.firstOrNull { it.author.username != "creator" }
-                ?: hydratedOwnVideos.firstOrNull { it.author.username != "creator" }
-                ?: mirrorOwnVideos.firstOrNull()
-                ?: htmlOwnVideos.firstOrNull()
-            )?.author
-
-        val baseAuthor = htmlProfile?.author
-            ?: webAuthor
-            ?: embedProfile?.author
-            ?: hintAuthor
-            ?: gbData?.author
-            ?: matchedSearchAuthor
-            ?: Author(id = clean, username = canonicalHandle.ifBlank { clean }, displayName = clean)
+        val resolvedFirstVideoAuthor = firstVideoAuthor
+            ?: hydratedOwnVideos.firstOrNull { it.author.username != "creator" }?.author
 
         val resolvedAuthor = Author(
-            id = firstVideoAuthor?.id?.ifBlank { baseAuthor.id } ?: baseAuthor.id,
-            username = firstVideoAuthor?.username?.ifBlank { baseAuthor.username } ?: baseAuthor.username,
-            displayName = (htmlProfile?.author?.displayName?.takeIf { it.isNotBlank() }
-                ?: firstVideoAuthor?.displayName?.ifBlank { baseAuthor.displayName }
+            id = resolvedFirstVideoAuthor?.id?.ifBlank { baseAuthor.id } ?: baseAuthor.id,
+            username = resolvedFirstVideoAuthor?.username?.ifBlank { baseAuthor.username } ?: baseAuthor.username,
+            displayName = (mirrorUserInfo?.displayName?.takeIf { it.isNotBlank() && !it.equals(clean, ignoreCase = true) }
+                ?: htmlProfile?.author?.displayName?.takeIf { it.isNotBlank() }
+                ?: resolvedFirstVideoAuthor?.displayName?.ifBlank { baseAuthor.displayName }
                 ?: baseAuthor.displayName),
-            avatarUrl = htmlProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
+            avatarUrl = mirrorUserInfo?.avatarUrl?.takeIf { it.isNotBlank() }
+                ?: htmlProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
                 ?: webAuthor?.avatarUrl?.takeIf { it.isNotBlank() }
                 ?: embedProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
-                ?: firstVideoAuthor?.avatarUrl?.takeIf { it.isNotBlank() }
+                ?: resolvedFirstVideoAuthor?.avatarUrl?.takeIf { it.isNotBlank() }
                 ?: baseAuthor.avatarUrl.takeIf { it.isNotBlank() }
                 ?: matchedSearchAuthor?.avatarUrl.orEmpty(),
-            bio = htmlProfile?.author?.bio?.takeIf { it.isNotBlank() }
+            bio = mirrorUserInfo?.bio?.takeIf { it.isNotBlank() }
+                ?: htmlProfile?.author?.bio?.takeIf { it.isNotBlank() }
                 ?: webAuthor?.bio?.takeIf { it.isNotBlank() }
                 ?: embedProfile?.author?.bio?.takeIf { it.isNotBlank() }
-                ?: firstVideoAuthor?.bio?.takeIf { it.isNotBlank() }
+                ?: resolvedFirstVideoAuthor?.bio?.takeIf { it.isNotBlank() }
                 ?: baseAuthor.bio.takeIf { it.isNotBlank() }
                 ?: gbData?.author?.bio.orEmpty(),
-            verified = (htmlProfile?.author?.verified == true) ||
+            verified = (mirrorUserInfo?.verified == true) ||
+                (htmlProfile?.author?.verified == true) ||
                 (webAuthor?.verified == true) ||
                 (embedProfile?.author?.verified == true) ||
-                (firstVideoAuthor?.verified == true) ||
+                (resolvedFirstVideoAuthor?.verified == true) ||
                 baseAuthor.verified,
             secUid = effectiveSecUid
-                .ifBlank { firstVideoAuthor?.secUid.orEmpty() }
+                .ifBlank { resolvedFirstVideoAuthor?.secUid.orEmpty() }
                 .ifBlank { baseAuthor.secUid },
             followingCount = maxOf(
+                mirrorUserInfo?.followingCount ?: 0L,
                 htmlProfile?.author?.followingCount ?: 0L,
                 webAuthor?.followingCount ?: 0L,
                 embedProfile?.author?.followingCount ?: 0L,
-                firstVideoAuthor?.followingCount ?: 0L,
+                resolvedFirstVideoAuthor?.followingCount ?: 0L,
                 baseAuthor.followingCount,
                 gbData?.author?.followingCount ?: 0L
             ),
             followersCount = maxOf(
+                mirrorUserInfo?.followersCount ?: 0L,
                 htmlProfile?.author?.followersCount ?: 0L,
                 webAuthor?.followersCount ?: 0L,
                 embedProfile?.author?.followersCount ?: 0L,
-                firstVideoAuthor?.followersCount ?: 0L,
+                resolvedFirstVideoAuthor?.followersCount ?: 0L,
                 baseAuthor.followersCount,
                 gbData?.author?.followersCount ?: 0L
             ),
             likesCount = maxOf(
+                mirrorUserInfo?.likesCount ?: 0L,
                 htmlProfile?.author?.likesCount ?: 0L,
                 webAuthor?.likesCount ?: 0L,
                 embedProfile?.author?.likesCount ?: 0L,
-                firstVideoAuthor?.likesCount ?: 0L,
+                resolvedFirstVideoAuthor?.likesCount ?: 0L,
                 baseAuthor.likesCount,
                 gbData?.author?.likesCount ?: 0L
             ),
             videoCount = maxOf(
-                htmlProfile?.author?.videoCount ?: 0L,
-                webAuthor?.videoCount ?: 0L,
-                firstVideoAuthor?.videoCount ?: 0L,
-                baseAuthor.videoCount,
-                gbData?.author?.videoCount ?: 0L
+                preliminaryVideoCount,
+                resolvedFirstVideoAuthor?.videoCount ?: 0L
             )
         )
 
@@ -1864,12 +1972,12 @@ class ScraperVideoRepository(
             allowedUsernames.any { it.equals(v.author.username, ignoreCase = true) }
         }
 
-        // Preserve exact creator timeline order first
+        // Preserve creator timeline order cleanly, preferring richer web/mirror items first
         val combined = LinkedHashMap<String, VideoItem>()
-        creatorVideos.forEach { combined.putIfAbsent(it.id, it) }
         webOwnVideos.forEach { combined.putIfAbsent(it.id, it) }
-        hydratedOwnVideos.forEach { combined.putIfAbsent(it.id, it) }
         mirrorOwnVideos.forEach { combined.putIfAbsent(it.id, it) }
+        creatorVideos.forEach { combined.putIfAbsent(it.id, it) }
+        hydratedOwnVideos.forEach { combined.putIfAbsent(it.id, it) }
         htmlOwnVideos.forEach { combined.putIfAbsent(it.id, it) }
         (persistedHistory + inMemoryAuthorVideos)
             .sortedWith(compareByDescending<VideoItem> { it.createdAt }.thenByDescending { it.stats.viewsCount })
@@ -1914,18 +2022,34 @@ class ScraperVideoRepository(
             prefs.recordAuthorVideos(resolvedAuthor.username, finalVideos)
         }
 
-        val nextCursorValue = when {
-            creatorVideos.isNotEmpty() && creatorPage?.hasMore == true && !creatorPage.nextCursor.isNullOrBlank() ->
-                "creator:${creatorPage.nextCursor}"
-            webOwnVideos.isNotEmpty() && webHasMorePrevious && webMinCreateMs.isNotBlank() ->
-                "creator:$webMinCreateMs"
-            webOwnVideos.isNotEmpty() && webHasMore && webNextCursor.isNotBlank() && webNextCursor != "0" ->
-                "wv:$webNextCursor"
-            shouldHydrateRefs && pendingProfileRefs.containsKey(keyLower) ->
-                "refs_${ScraperConfig.PROFILE_INITIAL_BATCH_SIZE}"
-            postsPage.hasMore && !postsPage.nextCursor.isNullOrBlank() && mirrorOwnVideos.isNotEmpty() ->
-                "mirror:${postsPage.nextCursor}"
-            else -> null
+        // Build chained multi-source pagination queue so partial primary sources continue into secondary ones automatically
+        val stageQueue = ArrayDeque<String>()
+        if (webOwnVideos.isNotEmpty() && webHasMore && webNextCursor.isNotBlank() && webNextCursor != "0") {
+            stageQueue.add("wv:$webNextCursor")
+        }
+        if (mirrorOwnVideos.isNotEmpty() && postsPage.hasMore && !postsPage.nextCursor.isNullOrBlank()) {
+            stageQueue.add("mirror:${postsPage.nextCursor}")
+        }
+        if (creatorVideos.isNotEmpty() && creatorPage?.hasMore == true && !creatorPage.nextCursor.isNullOrBlank()) {
+            stageQueue.add("creator:${creatorPage.nextCursor}")
+        } else if (webOwnVideos.isNotEmpty() && webHasMorePrevious && webMinCreateMs.isNotBlank()) {
+            stageQueue.add("creator:$webMinCreateMs")
+        }
+        if (shouldHydrateRefs && pendingProfileRefs.containsKey(keyLower)) {
+            stageQueue.add("refs_${ScraperConfig.PROFILE_INITIAL_BATCH_SIZE}")
+        }
+        if (webResp == null && (resolvedAuthor.videoCount > finalVideos.size || finalVideos.isEmpty())) {
+            stageQueue.add("wv:0")
+        }
+        if (mirrorOwnVideos.isEmpty() && (resolvedAuthor.videoCount > finalVideos.size || finalVideos.isEmpty())) {
+            stageQueue.add("mirror:0")
+        }
+
+        val nextCursorValue = if (stageQueue.isNotEmpty()) stageQueue.removeFirst() else null
+        if (stageQueue.isNotEmpty()) {
+            profileFallbackQueues[keyLower] = stageQueue
+        } else {
+            profileFallbackQueues.remove(keyLower)
         }
 
         UserProfileResult(
@@ -1990,6 +2114,7 @@ class ScraperVideoRepository(
         authorVideoMap.clear()
         blockedEndpointsUntil.clear()
         pendingProfileRefs.clear()
+        profileFallbackQueues.clear()
         categoryRefPools.clear()
         secUidByUsername.clear()
         userIdByUsername.clear()
@@ -2263,7 +2388,27 @@ class ScraperVideoRepository(
             )
         }.getOrNull().orEmpty()
 
-        return parseDetailHtml(cookielessHtml)
+        parseDetailHtml(cookielessHtml)?.let { return it }
+
+        val photoUrl = "${ScraperConfig.TIKTOK_WEB_BASE}/@${urlEncode(cleanUser)}/photo/$videoId"
+        val photoCookieHtml = runCatching {
+            executeGet(
+                url = photoUrl,
+                acceptJson = false,
+                userAgent = ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE,
+                referer = ScraperConfig.HEADER_REFERER_VALUE
+            )
+        }.getOrNull().orEmpty()
+        parseDetailHtml(photoCookieHtml)?.let { return it }
+
+        val photoCookielessHtml = runCatching {
+            executeGooglebotGet(
+                url = photoUrl,
+                userAgent = ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE,
+                bypassHttpCache = true
+            )
+        }.getOrNull().orEmpty()
+        return parseDetailHtml(photoCookielessHtml)
     }
 
     private fun parseCompactStatText(raw: String?): Long {
@@ -2474,15 +2619,32 @@ class ScraperVideoRepository(
         }.getOrDefault(FeedPage(emptyList(), null, false))
     }
 
-    private fun fetchUserPostsMirror(username: String, cursor: String?): FeedPage {
+    private fun fetchUserInfoMirror(username: String, secUid: String = ""): Author? {
+        if (isEndpointBlocked("tikwm_user_info")) return null
+        return runCatching {
+            val builder = ScraperConfig.API_USER_INFO.toHttpUrlOrNull()?.newBuilder() ?: return null
+            if (username.isNotBlank()) builder.addQueryParameter("unique_id", username)
+            if (secUid.isNotBlank()) builder.addQueryParameter("sec_uid", secUid)
+            val root = apiGetJson(builder.build().toString(), endpointKey = "tikwm_user_info")
+            val data = root.optJSONObject("data") ?: return null
+            val u = data.optJSONObject("user") ?: data
+            val stats = data.optJSONObject("stats")
+            val uname = u.optCleanString("uniqueId")
+                .ifBlank { u.optCleanString("unique_id") }
+                .ifBlank { username }
+            buildAuthorFromUserJson(u, stats, uname)
+        }.getOrNull()
+    }
+
+    private fun fetchUserPostsMirror(username: String, cursor: String?, secUid: String = ""): FeedPage {
         if (isEndpointBlocked("tikwm_user_posts")) return FeedPage(emptyList(), null, false)
         return runCatching {
-            val form = FormBody.Builder()
-                .add("unique_id", username)
-                .add("count", "30")
+            val formBuilder = FormBody.Builder()
+                .add("count", "35")
                 .add("cursor", cursor ?: "0")
-                .build()
-            val root = apiPostJson(ScraperConfig.API_USER_POSTS, form, endpointKey = "tikwm_user_posts")
+            if (username.isNotBlank()) formBuilder.add("unique_id", username)
+            if (secUid.isNotBlank()) formBuilder.add("sec_uid", secUid)
+            val root = apiPostJson(ScraperConfig.API_USER_POSTS, formBuilder.build(), endpointKey = "tikwm_user_posts")
             extractFeedPageFromMirrorJson(root)
         }.getOrDefault(FeedPage(emptyList(), null, false))
     }
@@ -2526,14 +2688,20 @@ class ScraperVideoRepository(
                     return@runCatching FeedPage(emptyList(), null, hasPrevEmpty)
                 }
                 val hasMorePrev = root.optBoolean("hasMorePrevious", false)
+                val hasMoreFlag = root.optBoolean("hasMore", false)
+                val apiCursor = root.optCleanString("cursor")
                 val minCreateSec = videos.mapNotNull { it.createdAt.takeIf { ts -> ts > 0L } }.minOrNull()
                     ?: videos.lastOrNull()?.createdAt?.takeIf { it > 0L }
                 val nextMs = minCreateSec?.let { (it * 1000L).toString() }
-                val hasNext = hasMorePrev && !nextMs.isNullOrBlank() && nextMs != cursor
+                val chosenNext = when {
+                    hasMorePrev && !nextMs.isNullOrBlank() && nextMs != cursor -> nextMs
+                    hasMoreFlag && apiCursor.isNotBlank() && apiCursor != "0" && apiCursor != cursor -> apiCursor
+                    else -> null
+                }
                 FeedPage(
                     videos = videos,
-                    nextCursor = if (hasNext) nextMs else null,
-                    hasMore = hasNext
+                    nextCursor = chosenNext,
+                    hasMore = chosenNext != null
                 )
             }.getOrNull()
         }
@@ -3062,14 +3230,50 @@ class ScraperVideoRepository(
         return list
     }
 
+    private fun extractImagePostUrls(obj: JSONObject): List<String> {
+        val imagePost = obj.optJSONObject("imagePost") ?: obj.optJSONObject("image_post_info")
+        val imagesArr = imagePost?.optJSONArray("images") ?: return emptyList()
+        val urls = mutableListOf<String>()
+        for (i in 0 until imagesArr.length()) {
+            val raw = imagesArr.opt(i) ?: continue
+            if (raw is String) {
+                val u = normalizeUrl(raw)
+                if (u.startsWith("http")) urls.add(u)
+                continue
+            }
+            val imgObj = raw as? JSONObject ?: continue
+            val urlHolder = imgObj.optJSONObject("imageURL")
+                ?: imgObj.optJSONObject("image_url")
+                ?: imgObj.optJSONObject("displayImage")
+                ?: imgObj.optJSONObject("display_image")
+                ?: imgObj
+            val arr = urlHolder.optJSONArray("urlList")
+                ?: urlHolder.optJSONArray("url_list")
+                ?: urlHolder.optJSONArray("UrlList")
+            if (arr != null) {
+                for (j in 0 until arr.length()) {
+                    val u = normalizeUrl(arr.optString(j, ""))
+                    if (u.startsWith("http")) {
+                        urls.add(u)
+                        break
+                    }
+                }
+            }
+        }
+        return urls.distinct()
+    }
+
     private fun parseSingleTikTokItem(obj: JSONObject, fallbackId: String): VideoItem? {
         val id = obj.optCleanString("id")
             .ifBlank { obj.optCleanString("aweme_id") }
             .ifBlank { fallbackId }
-        val videoObj = obj.optJSONObject("video") ?: return null
+        val videoObj = obj.optJSONObject("video")
+        val imageUrls = extractImagePostUrls(obj)
+        if (videoObj == null && imageUrls.isEmpty()) return null
+
         val h264Urls = mutableListOf<String>()
         val otherBitrateUrls = mutableListOf<String>()
-        val bitrateInfo = videoObj.optJSONArray("bitrateInfo") ?: videoObj.optJSONArray("bit_rate")
+        val bitrateInfo = videoObj?.optJSONArray("bitrateInfo") ?: videoObj?.optJSONArray("bit_rate")
         if (bitrateInfo != null) {
             for (b in 0 until bitrateInfo.length()) {
                 val entry = bitrateInfo.optJSONObject(b) ?: continue
@@ -3092,18 +3296,22 @@ class ScraperVideoRepository(
                 }
             }
         }
-        val playAddr = normalizeUrl(
-            extractVideoMediaUrl(videoObj, "playAddr")
-                .ifBlank { extractVideoMediaUrl(videoObj, "PlayAddrStruct") }
-                .ifBlank { extractVideoMediaUrl(videoObj, "play_addr") }
-        )
-        val downloadAddr = normalizeUrl(
-            extractVideoMediaUrl(videoObj, "downloadAddr")
-                .ifBlank { extractVideoMediaUrl(videoObj, "download_addr") }
-        )
+        val playAddr = if (videoObj != null) {
+            normalizeUrl(
+                extractVideoMediaUrl(videoObj, "playAddr")
+                    .ifBlank { extractVideoMediaUrl(videoObj, "PlayAddrStruct") }
+                    .ifBlank { extractVideoMediaUrl(videoObj, "play_addr") }
+            )
+        } else ""
+        val downloadAddr = if (videoObj != null) {
+            normalizeUrl(
+                extractVideoMediaUrl(videoObj, "downloadAddr")
+                    .ifBlank { extractVideoMediaUrl(videoObj, "download_addr") }
+            )
+        } else ""
         val primaryUrl = h264Urls.firstOrNull()
             ?: playAddr.ifBlank { downloadAddr }.ifBlank { otherBitrateUrls.firstOrNull().orEmpty() }
-        if (primaryUrl.isBlank()) return null
+        if (primaryUrl.isBlank() && imageUrls.isEmpty()) return null
 
         val authorObj = obj.optJSONObject("author")
         val authorStatsObj = obj.optJSONObject("authorStats") ?: obj.optJSONObject("author_stats")
@@ -3114,6 +3322,32 @@ class ScraperVideoRepository(
         val musicObj = obj.optJSONObject("music") ?: obj.optJSONObject("music_info")
         val statsObj = obj.optJSONObject("stats") ?: obj.optJSONObject("statistics")
         val desc = obj.optCleanString("desc").ifBlank { obj.optCleanString("title") }
+        val musicPlayUrl = normalizeUrl(
+            musicObj?.let { m ->
+                extractVideoMediaUrl(m, "playUrl")
+                    .ifBlank { extractVideoMediaUrl(m, "play_url") }
+                    .ifBlank { extractVideoMediaUrl(m, "play") }
+            }.orEmpty()
+        )
+        val effectiveAudioUrl = if (imageUrls.isNotEmpty()) {
+            musicPlayUrl.ifBlank { primaryUrl }
+        } else {
+            musicPlayUrl
+        }
+        val imagePostCover = obj.optJSONObject("imagePost")?.optJSONObject("cover")?.let { c ->
+            val arr = c.optJSONObject("imageURL")?.optJSONArray("urlList")
+                ?: c.optJSONArray("urlList")
+                ?: c.optJSONArray("url_list")
+            arr?.optString(0, "").orEmpty()
+        }.orEmpty()
+
+        val rawCover = if (videoObj != null) {
+            extractVideoMediaUrl(videoObj, "originCover")
+                .ifBlank { extractVideoMediaUrl(videoObj, "origin_cover") }
+                .ifBlank { extractVideoMediaUrl(videoObj, "cover") }
+                .ifBlank { extractVideoMediaUrl(videoObj, "dynamicCover") }
+                .ifBlank { extractVideoMediaUrl(videoObj, "dynamic_cover") }
+        } else ""
 
         val avatarUrl = normalizeUrl(
             authorObj?.let { a ->
@@ -3128,16 +3362,10 @@ class ScraperVideoRepository(
 
         return VideoItem(
             id = id,
-            videoUrl = primaryUrl,
-            hdVideoUrl = h264Urls.firstOrNull() ?: playAddr.ifBlank { primaryUrl },
-            sdVideoUrl = h264Urls.lastOrNull() ?: downloadAddr.ifBlank { playAddr }.ifBlank { primaryUrl },
-            coverUrl = normalizeUrl(
-                extractVideoMediaUrl(videoObj, "originCover")
-                    .ifBlank { extractVideoMediaUrl(videoObj, "origin_cover") }
-                    .ifBlank { extractVideoMediaUrl(videoObj, "cover") }
-                    .ifBlank { extractVideoMediaUrl(videoObj, "dynamicCover") }
-                    .ifBlank { extractVideoMediaUrl(videoObj, "dynamic_cover") }
-            ),
+            videoUrl = if (imageUrls.isNotEmpty()) effectiveAudioUrl else primaryUrl,
+            hdVideoUrl = if (imageUrls.isNotEmpty()) effectiveAudioUrl else (h264Urls.firstOrNull() ?: playAddr.ifBlank { primaryUrl }),
+            sdVideoUrl = if (imageUrls.isNotEmpty()) effectiveAudioUrl else (h264Urls.lastOrNull() ?: downloadAddr.ifBlank { playAddr }.ifBlank { primaryUrl }),
+            coverUrl = normalizeUrl(rawCover.ifBlank { imagePostCover }.ifBlank { imageUrls.firstOrNull().orEmpty() }),
             caption = stripTrailingHashtags(desc).ifBlank { desc },
             hashtags = extractHashtags(desc),
             author = Author(
@@ -3190,8 +3418,14 @@ class ScraperVideoRepository(
                 viewsCount = statsObj?.optLong("playCount", 0L)?.takeIf { it > 0L }
                     ?: statsObj?.optLong("play_count", 0L) ?: 0L
             ),
-            shareUrl = ScraperConfig.TIKTOK_VIDEO_SHARE_TEMPLATE.format(username, id),
-            createdAt = obj.optLong("createTime", 0L).takeIf { it > 0L } ?: obj.optLong("create_time", 0L)
+            shareUrl = if (imageUrls.isNotEmpty()) {
+                "${ScraperConfig.TIKTOK_WEB_BASE}/@$username/photo/$id"
+            } else {
+                ScraperConfig.TIKTOK_VIDEO_SHARE_TEMPLATE.format(username, id)
+            },
+            createdAt = obj.optLong("createTime", 0L).takeIf { it > 0L } ?: obj.optLong("create_time", 0L),
+            imageUrls = imageUrls,
+            audioUrl = effectiveAudioUrl
         )
     }
 
@@ -3206,25 +3440,38 @@ class ScraperVideoRepository(
             val hdPlay = normalizeUrl(obj.optCleanString("hdplay"))
             val wmPlay = normalizeUrl(obj.optCleanString("wmplay"))
             val playable = play.ifBlank { hdPlay }.ifBlank { wmPlay }
-            if (id.isBlank() || playable.isBlank()) continue
+            val imagesArr = obj.optJSONArray("images")
+            val imageUrls = if (imagesArr != null && imagesArr.length() > 0) {
+                (0 until imagesArr.length()).mapNotNull { idx ->
+                    val u = normalizeUrl(imagesArr.optString(idx, ""))
+                    u.takeIf { it.startsWith("http") }
+                }.distinct()
+            } else emptyList()
+            if (id.isBlank() || (playable.isBlank() && imageUrls.isEmpty())) continue
             val authorObj = obj.optJSONObject("author")
             val username = authorObj?.optCleanString("unique_id").orEmpty()
                 .ifBlank { authorObj?.optCleanString("uniqueId").orEmpty() }
                 .ifBlank { "creator" }
             val displayName = authorObj?.optCleanString("nickname").orEmpty().ifBlank { username }
             val musicInfoObj = obj.optJSONObject("music_info")
+            val musicPlay = normalizeUrl(
+                musicInfoObj?.optCleanString("play").orEmpty()
+                    .ifBlank { obj.optCleanString("music") }
+            )
+            val audioTrack = if (imageUrls.isNotEmpty()) musicPlay.ifBlank { playable } else musicPlay
             val rawCaption = obj.optCleanString("title").ifBlank { obj.optCleanString("desc") }
+            val rawCover = normalizeUrl(
+                obj.optCleanString("origin_cover")
+                    .ifBlank { obj.optCleanString("cover") }
+                    .ifBlank { obj.optCleanString("ai_dynamic_cover") }
+            ).ifBlank { imageUrls.firstOrNull().orEmpty() }
             result.add(
                 VideoItem(
                     id = id,
-                    videoUrl = playable,
-                    hdVideoUrl = hdPlay.ifBlank { playable },
-                    sdVideoUrl = wmPlay.ifBlank { playable },
-                    coverUrl = normalizeUrl(
-                        obj.optCleanString("origin_cover")
-                            .ifBlank { obj.optCleanString("cover") }
-                            .ifBlank { obj.optCleanString("ai_dynamic_cover") }
-                    ),
+                    videoUrl = if (imageUrls.isNotEmpty()) audioTrack else playable,
+                    hdVideoUrl = if (imageUrls.isNotEmpty()) audioTrack else hdPlay.ifBlank { playable },
+                    sdVideoUrl = if (imageUrls.isNotEmpty()) audioTrack else wmPlay.ifBlank { playable },
+                    coverUrl = rawCover,
                     caption = stripTrailingHashtags(rawCaption).ifBlank { rawCaption },
                     hashtags = extractHashtags(rawCaption),
                     author = Author(
@@ -3253,8 +3500,14 @@ class ScraperVideoRepository(
                         sharesCount = obj.optLong("share_count", 0L),
                         viewsCount = obj.optLong("play_count", 0L)
                     ),
-                    shareUrl = ScraperConfig.TIKTOK_VIDEO_SHARE_TEMPLATE.format(username, id),
-                    createdAt = obj.optLong("create_time", 0L)
+                    shareUrl = if (imageUrls.isNotEmpty()) {
+                        "${ScraperConfig.TIKTOK_WEB_BASE}/@$username/photo/$id"
+                    } else {
+                        ScraperConfig.TIKTOK_VIDEO_SHARE_TEMPLATE.format(username, id)
+                    },
+                    createdAt = obj.optLong("create_time", 0L),
+                    imageUrls = imageUrls,
+                    audioUrl = audioTrack
                 )
             )
         }
@@ -3738,7 +3991,7 @@ class ScraperVideoRepository(
 
     private companion object {
         const val API_MIN_INTERVAL_MS = 1200L
-        val VIDEO_PATH_REGEX = Regex("(?:https?://(?:www\\.|m\\.)?tiktok\\.com)?/@([A-Za-z0-9._]+)/video/(\\d{15,22})")
+        val VIDEO_PATH_REGEX = Regex("(?:https?://(?:www\\.|m\\.)?tiktok\\.com)?/@([A-Za-z0-9._]+)/(?:video|photo)/(\\d{15,22})")
         val SEC_UID_JSON_REGEX = Regex("\"secUid\"\\s*:\\s*\"([^\"]+)\"")
         val SEC_UID_TOKEN_REGEX = Regex("(MS4wLjABAAAA[A-Za-z0-9_-]{20,})")
     }

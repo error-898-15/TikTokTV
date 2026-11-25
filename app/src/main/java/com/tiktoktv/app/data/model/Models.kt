@@ -64,15 +64,26 @@ data class VideoItem(
     val shareUrl: String = "",
     val createdAt: Long = 0L,
     val isLiked: Boolean = false,
-    val isSaved: Boolean = false
+    val isSaved: Boolean = false,
+    val imageUrls: List<String> = emptyList(),
+    val audioUrl: String = ""
 ) {
+    val isPhotoPost: Boolean
+        get() = imageUrls.isNotEmpty()
+
     fun resolveUrlForQuality(quality: VideoQuality): String = when (quality) {
-        VideoQuality.AUTO -> videoUrl
-        VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }
-        VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }
+        VideoQuality.AUTO -> videoUrl.ifBlank { audioUrl }
+        VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }.ifBlank { audioUrl }
+        VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }.ifBlank { audioUrl }
     }
 
     fun resolveCandidateUrls(quality: VideoQuality): List<String> {
+        if (isPhotoPost) {
+            return listOf(audioUrl, videoUrl)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                .distinct()
+        }
         val primary = resolveUrlForQuality(quality)
         return listOf(primary, videoUrl, sdVideoUrl, hdVideoUrl)
             .map { it.trim() }

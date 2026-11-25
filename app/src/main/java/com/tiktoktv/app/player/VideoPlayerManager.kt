@@ -100,7 +100,33 @@ class VideoPlayerManager(
         playVideo(listOf(url), autoplay)
     }
 
+    fun playPhotoAudio(audioUrl: String, autoplay: Boolean) {
+        val clean = audioUrl.trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
+        if (clean.isBlank()) {
+            clearForPhotoPost()
+            return
+        }
+        mainPlayer.repeatMode = Player.REPEAT_MODE_ONE
+        playVideoInternal(listOf(clean), autoplay)
+    }
+
+    fun clearForPhotoPost() {
+        currentVideoUrl = ""
+        candidateUrls = emptyList()
+        candidateIndex = 0
+        _isBuffering.value = false
+        _playbackError.value = null
+        _hasRenderedFirstFrame.value = false
+        mainPlayer.stop()
+        mainPlayer.clearMediaItems()
+    }
+
     fun playVideo(urls: List<String>, autoplay: Boolean) {
+        mainPlayer.repeatMode = if (autoScrollEnabled) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+        playVideoInternal(urls, autoplay)
+    }
+
+    private fun playVideoInternal(urls: List<String>, autoplay: Boolean) {
         val cleanUrls = urls.map { it.trim() }
             .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
             .distinct()

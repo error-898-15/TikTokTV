@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
@@ -333,6 +334,10 @@ fun ProfileScreen(
                             Spacer(modifier = Modifier.height(14.dp))
 
                             if (uiState.profileError != null && uiState.profileVideos.isEmpty()) {
+                                val retryFocus = remember { FocusRequester() }
+                                LaunchedEffect(uiState.profileError) {
+                                    runCatching { retryFocus.requestFocus() }
+                                }
                                 Column(
                                     modifier = Modifier.fillMaxSize(),
                                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -346,10 +351,15 @@ fun ProfileScreen(
                                     Spacer(modifier = Modifier.height(18.dp))
                                     FocusPillButton(
                                         label = "Retry",
+                                        focusRequester = retryFocus,
                                         onClick = onRetryProfile
                                     )
                                 }
                             } else if (uiState.profileVideos.isEmpty() && !uiState.isOwnProfile) {
+                                val retryFocus = remember { FocusRequester() }
+                                LaunchedEffect(uiState.profileAuthor?.username) {
+                                    runCatching { retryFocus.requestFocus() }
+                                }
                                 Column(
                                     modifier = Modifier.fillMaxSize(),
                                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -363,6 +373,7 @@ fun ProfileScreen(
                                     Spacer(modifier = Modifier.height(18.dp))
                                     FocusPillButton(
                                         label = "Retry",
+                                        focusRequester = retryFocus,
                                         onClick = onRetryProfile
                                     )
                                 }
@@ -566,6 +577,33 @@ private fun VideoGridThumbnailCard(video: VideoItem, onClick: () -> Unit) {
                     )
                 )
         )
+        if (video.isPhotoPost) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(7.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Collections,
+                    contentDescription = "Photo post",
+                    tint = TikTokColors.White,
+                    modifier = Modifier.size(13.dp)
+                )
+                if (video.imageUrls.size > 1) {
+                    Text(
+                        text = video.imageUrls.size.toString(),
+                        color = TikTokColors.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
         Row(
             modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
