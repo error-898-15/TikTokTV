@@ -1,5 +1,6 @@
 package com.tiktoktv.app.data.repository
 
+import com.tiktoktv.app.data.model.Author
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
 import com.tiktoktv.app.data.model.FeedPage
@@ -8,6 +9,7 @@ import com.tiktoktv.app.data.model.UnifiedSearchResult
 import com.tiktoktv.app.data.model.UserProfileResult
 
 interface VideoRepository {
+
     suspend fun getForYouFeed(
         cursor: String? = null,
         forceRefresh: Boolean = false,
@@ -35,6 +37,8 @@ interface VideoRepository {
         query: String
     ): List<SearchSuggestion>
 
+    fun seedAuthorHint(author: Author) {}
+
     suspend fun getUserProfile(
         username: String,
         cursor: String? = null,
@@ -47,5 +51,6 @@ interface VideoRepository {
     ): Result<List<Comment>>
 
     suspend fun clearCache(): Long
+
     suspend fun getCacheSizeBytes(): Long
 }
