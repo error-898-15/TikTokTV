@@ -144,7 +144,21 @@ data class HashtagResult(
     val tag: String,
     val viewCountText: String = "",
     val videoCount: Int = 0,
-    val previewCoverUrl: String = ""
+    val previewCoverUrl: String = "",
+    val challengeId: String = "",
+    val viewCount: Long = 0L
+)
+
+data class UsersPage(
+    val users: List<Author>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean = false
+)
+
+data class HashtagsPage(
+    val hashtags: List<HashtagResult>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean = false
 )
 
 data class UnifiedSearchResult(
@@ -155,7 +169,11 @@ data class UnifiedSearchResult(
     val hashtags: List<HashtagResult> = emptyList(),
     val relatedQueries: List<String> = emptyList(),
     val nextCursor: String? = null,
-    val hasMore: Boolean = false
+    val hasMore: Boolean = false,
+    val usersNextCursor: String? = null,
+    val usersHasMore: Boolean = false,
+    val hashtagsNextCursor: String? = null,
+    val hashtagsHasMore: Boolean = false
 )
 
 data class AppSettings(
