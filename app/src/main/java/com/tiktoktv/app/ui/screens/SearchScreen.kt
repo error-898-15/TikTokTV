@@ -261,8 +261,15 @@ fun SearchScreen(
                         SearchTab.LIVE -> uiState.searchLiveStreams.size
                         SearchTab.HASHTAGS -> uiState.searchHashtags.size
                     }
+                    val suffix = when {
+                        count <= 0 -> ""
+                        (tab == SearchTab.TOP || tab == SearchTab.VIDEOS) && uiState.searchHasMore -> " ($count+)"
+                        tab == SearchTab.USERS && uiState.searchUsersHasMore -> " ($count+)"
+                        tab == SearchTab.HASHTAGS && uiState.searchHashtagsHasMore -> " ($count+)"
+                        else -> " ($count)"
+                    }
                     SearchTabButton(
-                        label = if (count > 0) "${tab.label} ($count)" else tab.label,
+                        label = "${tab.label}$suffix",
                         selected = uiState.activeSearchTab == tab,
                         onClick = { onSelectTab(tab) }
                     )

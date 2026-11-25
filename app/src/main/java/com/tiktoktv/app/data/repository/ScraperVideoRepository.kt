@@ -8,6 +8,7 @@ import com.tiktoktv.app.data.local.LocalPrefsRepository
 import com.tiktoktv.app.data.model.Author
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
+import com.tiktoktv.app.data.model.ContentRegion
 import com.tiktoktv.app.data.model.FeedPage
 import com.tiktoktv.app.data.model.HashtagResult
 import com.tiktoktv.app.data.model.HashtagsPage
@@ -250,79 +251,271 @@ class ScraperVideoRepository(
         forceRefresh: Boolean,
         excludeIds: Set<String>
     ): Result<FeedPage> = withContext(Dispatchers.IO) {
-        val cacheKey = "foryou_v2_${cursor ?: "0"}"
+        val region = prefs.getSettings().contentRegion
+        val cursorState = cursor?.let { decodeForYouCursor(it) }
+        val pageNum = cursorState?.pageNum ?: 0
+        val cacheKey = "foryou_v3_${region.name}_$pageNum"
+
         if (!forceRefresh && cursor != null) {
-            readCachedFeed(cacheKey)?.let { page ->
-                indexVideos(page.videos)
-                return@withContext Result.success(page)
+            readCachedFeed(cacheKey)?.let { cached ->
+                val unseenCached = cached.videos.filterNot { excludeIds.contains(it.id) }
+                if (unseenCached.size >= 8) {
+                    indexVideos(unseenCached)
+                    return@withContext Result.success(cached.copy(videos = unseenCached))
+                }
             }
         }
         lastApiError = null
 
         runCatching {
-            val combined = LinkedHashMap<String, VideoItem>()
-            coroutineScope {
-                val exploreMain = async {
-                    fetchTikTokExploreApi(
-                        categoryType = 120,
-                        cursor = cursor,
-                        forceNetwork = forceRefresh
-                    )
-                }
-                val trendingMirror = async {
-                    fetchTrendingFeedApi(
-                        cursor = cursor,
-                        randomizeRegion = forceRefresh || cursor == null,
-                        forceNetwork = forceRefresh
-                    )
-                }
-                val tagFallback = async {
-                    val pageIdx = cursor?.removePrefix("explore_")?.toIntOrNull() ?: 0
-                    if (pageIdx == 0) {
-                        val refs = fetchTagRefsFromHtml(
-                            ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format("fyp"),
+            val cycle = if (cursor == null) prefs.getAndIncrementFeedCycle() else pageNum
+            val primaryPool = LinkedHashMap<String, VideoItem>()
+            val mixPool = LinkedHashMap<String, VideoItem>()
+
+            var nextTrendingCursor = cursorState?.trendingCursor.orEmpty()
+            var nextMixCursor = cursorState?.mixCursor.orEmpty()
+            var nextTagIdx = cursorState?.tagIdx ?: (cycle % maxOf(1, region.discoveryHashtags.size))
+
+            when (region) {
+                ContentRegion.BANGLADESH_MIX -> {
+                    coroutineScope {
+                        val bdTrendingTask = async {
+                            fetchTrendingFeedApi(
+                                regionCode = "BD",
+                                cursor = nextTrendingCursor.ifBlank { null },
+                                count = ScraperConfig.DEFAULT_PAGE_SIZE,
+                                forceNetwork = forceRefresh || cursor == null
+                            )
+                        }
+                        val bdTagTask = async {
+                            val tag = region.discoveryHashtags[nextTagIdx % region.discoveryHashtags.size]
+                            fetchRegionTagOrSearchVideos(
+                                tag = tag,
+                                offset = if (cursor == null) 0 else pageNum * 12,
+                                forceNetwork = forceRefresh
+                            )
+                        }
+                        val exploreTask = async {
+                            fetchTikTokExploreApi(
+                                categoryType = 120,
+                                cursor = cursor,
+                                region = region,
+                                forceNetwork = forceRefresh
+                            )
+                        }
+                        val mixTask = async {
+                            val pool = ScraperConfig.GLOBAL_MIX_REGION_POOL
+                            val mixCode = pool[(cycle + pageNum) % pool.size]
+                            fetchTrendingFeedApi(
+                                regionCode = mixCode,
+                                cursor = nextMixCursor.ifBlank { null },
+                                count = 8,
+                                forceNetwork = forceRefresh || cursor == null
+                            )
+                        }
+
+                        bdTrendingTask.await()?.let { page ->
+                            page.videos.forEach { primaryPool[it.id] = it }
+                            nextTrendingCursor = page.nextCursor.orEmpty()
+                        }
+                        bdTagTask.await().forEach { primaryPool.putIfAbsent(it.id, it) }
+                        if (primaryPool.size < 14) {
+                            exploreTask.await()?.videos?.forEach { primaryPool.putIfAbsent(it.id, it) }
+                        } else {
+                            exploreTask.await()?.videos?.forEach { mixPool.putIfAbsent(it.id, it) }
+                        }
+                        mixTask.await()?.let { page ->
+                            page.videos.forEach { mixPool.putIfAbsent(it.id, it) }
+                            nextMixCursor = page.nextCursor.orEmpty()
+                        }
+                    }
+
+                    // If user already watched most top BD items on previous opens, pull deeper unseen BD batches
+                    var extraAttempts = 0
+                    var bdUnseenCount = primaryPool.values.count { !excludeIds.contains(it.id) }
+                    while (bdUnseenCount < 10 && extraAttempts < 2) {
+                        extraAttempts++
+                        nextTagIdx = (nextTagIdx + 1) % region.discoveryHashtags.size
+                        val extraTag = region.discoveryHashtags[nextTagIdx]
+                        val moreTrending = if (nextTrendingCursor.isNotBlank()) {
+                            fetchTrendingFeedApi(
+                                regionCode = "BD",
+                                cursor = nextTrendingCursor,
+                                count = ScraperConfig.DEFAULT_PAGE_SIZE,
+                                forceNetwork = true
+                            )?.also { page ->
+                                nextTrendingCursor = page.nextCursor.orEmpty()
+                            }?.videos.orEmpty()
+                        } else emptyList()
+                        val moreTagVideos = fetchRegionTagOrSearchVideos(
+                            tag = extraTag,
+                            offset = extraAttempts * 15,
                             forceNetwork = forceRefresh
-                        ).take(12)
-                        hydrateVideoRefs(refs)
-                    } else emptyList()
+                        )
+                        (moreTrending + moreTagVideos).forEach { primaryPool.putIfAbsent(it.id, it) }
+                        bdUnseenCount = primaryPool.values.count { !excludeIds.contains(it.id) }
+                    }
                 }
-                exploreMain.await()?.videos?.forEach { combined[it.id] = it }
-                trendingMirror.await()?.videos?.forEach { combined.putIfAbsent(it.id, it) }
-                if (combined.size < 8) {
-                    tagFallback.await().forEach { combined.putIfAbsent(it.id, it) }
+
+                ContentRegion.GLOBAL_MIX -> {
+                    val pool = ScraperConfig.TRENDING_REGION_POOL
+                    val r1 = pool[cycle % pool.size]
+                    val r2 = pool[(cycle + 3) % pool.size]
+                    coroutineScope {
+                        val t1 = async {
+                            fetchTrendingFeedApi(
+                                regionCode = r1,
+                                cursor = nextTrendingCursor.ifBlank { null },
+                                count = ScraperConfig.DEFAULT_PAGE_SIZE,
+                                forceNetwork = forceRefresh || cursor == null
+                            )
+                        }
+                        val t2 = async {
+                            fetchTrendingFeedApi(
+                                regionCode = r2,
+                                cursor = nextMixCursor.ifBlank { null },
+                                count = 10,
+                                forceNetwork = forceRefresh || cursor == null
+                            )
+                        }
+                        val exploreTask = async {
+                            fetchTikTokExploreApi(
+                                categoryType = 120,
+                                cursor = cursor,
+                                region = region,
+                                forceNetwork = forceRefresh
+                            )
+                        }
+                        t1.await()?.let { page ->
+                            page.videos.forEach { primaryPool[it.id] = it }
+                            nextTrendingCursor = page.nextCursor.orEmpty()
+                        }
+                        t2.await()?.let { page ->
+                            page.videos.forEach { primaryPool.putIfAbsent(it.id, it) }
+                            nextMixCursor = page.nextCursor.orEmpty()
+                        }
+                        exploreTask.await()?.videos?.forEach { primaryPool.putIfAbsent(it.id, it) }
+                    }
+                }
+
+                else -> {
+                    coroutineScope {
+                        val regTask = async {
+                            fetchTrendingFeedApi(
+                                regionCode = region.code,
+                                cursor = nextTrendingCursor.ifBlank { null },
+                                count = ScraperConfig.DEFAULT_PAGE_SIZE,
+                                forceNetwork = forceRefresh || cursor == null
+                            )
+                        }
+                        val tagTask = async {
+                            val tag = region.discoveryHashtags[nextTagIdx % region.discoveryHashtags.size]
+                            fetchRegionTagOrSearchVideos(
+                                tag = tag,
+                                offset = if (cursor == null) 0 else pageNum * 12,
+                                forceNetwork = forceRefresh
+                            )
+                        }
+                        val exploreTask = async {
+                            fetchTikTokExploreApi(
+                                categoryType = 120,
+                                cursor = cursor,
+                                region = region,
+                                forceNetwork = forceRefresh
+                            )
+                        }
+                        regTask.await()?.let { page ->
+                            page.videos.forEach { primaryPool[it.id] = it }
+                            nextTrendingCursor = page.nextCursor.orEmpty()
+                        }
+                        tagTask.await().forEach { primaryPool.putIfAbsent(it.id, it) }
+                        exploreTask.await()?.videos?.forEach { primaryPool.putIfAbsent(it.id, it) }
+                    }
+
+                    var extraAttempts = 0
+                    var unseenCount = primaryPool.values.count { !excludeIds.contains(it.id) }
+                    while (unseenCount < 10 && extraAttempts < 2) {
+                        extraAttempts++
+                        nextTagIdx = (nextTagIdx + 1) % region.discoveryHashtags.size
+                        val extraTag = region.discoveryHashtags[nextTagIdx]
+                        val moreTrending = if (nextTrendingCursor.isNotBlank()) {
+                            fetchTrendingFeedApi(
+                                regionCode = region.code,
+                                cursor = nextTrendingCursor,
+                                count = ScraperConfig.DEFAULT_PAGE_SIZE,
+                                forceNetwork = true
+                            )?.also { page ->
+                                nextTrendingCursor = page.nextCursor.orEmpty()
+                            }?.videos.orEmpty()
+                        } else emptyList()
+                        val moreTagVideos = fetchRegionTagOrSearchVideos(
+                            tag = extraTag,
+                            offset = extraAttempts * 15,
+                            forceNetwork = forceRefresh
+                        )
+                        (moreTrending + moreTagVideos).forEach { primaryPool.putIfAbsent(it.id, it) }
+                        unseenCount = primaryPool.values.count { !excludeIds.contains(it.id) }
+                    }
                 }
             }
 
-            if (combined.isEmpty()) {
-                val fypRefs = fetchTagRefsFromHtml(
-                    ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format("foryou"),
+            if (primaryPool.isEmpty() && mixPool.isEmpty()) {
+                val fallbackTag = region.discoveryHashtags.firstOrNull() ?: "foryou"
+                val refs = fetchTagRefsFromHtml(
+                    ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format(urlEncode(fallbackTag)),
                     forceNetwork = forceRefresh
                 ).take(ScraperConfig.CATEGORY_PAGE_SIZE)
-                hydrateVideoRefs(fypRefs).forEach { combined[it.id] = it }
+                hydrateVideoRefs(refs).forEach { primaryPool[it.id] = it }
             }
 
-            if (combined.isEmpty()) {
+            if (primaryPool.isEmpty() && mixPool.isEmpty()) {
                 throw ScraperException(noVideosMessage("No videos returned from feed endpoints."))
             }
 
-            val allVideos = combined.values.toList()
-            indexVideos(allVideos)
-            val unseen = allVideos.filterNot { excludeIds.contains(it.id) }.shuffled()
-            val seenFallback = allVideos.filter { excludeIds.contains(it.id) }.shuffled()
-            val ordered = unseen + seenFallback
+            val allCollected = (primaryPool.values + mixPool.values).distinctBy { it.id }
+            indexVideos(allCollected)
 
-            val nextPageNum = (cursor?.removePrefix("explore_")?.toIntOrNull() ?: 0) + 1
+            val primaryUnseen = primaryPool.values
+                .filterNot { excludeIds.contains(it.id) }
+                .shuffled()
+            val mixUnseen = mixPool.values
+                .filterNot { excludeIds.contains(it.id) || primaryPool.containsKey(it.id) }
+                .shuffled()
+
+            val orderedUnseen = if (region == ContentRegion.BANGLADESH_MIX && mixUnseen.isNotEmpty()) {
+                // Mostly Bangladeshi (~75%) interleaved with Global Mix (~25%)
+                interleaveWithRatio(primaryUnseen, mixUnseen, primaryPerBatch = 3)
+            } else {
+                (primaryUnseen + mixUnseen).distinctBy { it.id }
+            }
+
+            val ordered = if (orderedUnseen.size >= 4) {
+                orderedUnseen
+            } else {
+                val seenFallback = allCollected.filter { excludeIds.contains(it.id) }.shuffled()
+                (orderedUnseen + seenFallback).distinctBy { it.id }
+            }
+
+            val nextCursorState = ForYouCursorState(
+                pageNum = pageNum + 1,
+                trendingCursor = nextTrendingCursor,
+                mixCursor = nextMixCursor,
+                tagIdx = (nextTagIdx + 1) % maxOf(1, region.discoveryHashtags.size)
+            )
             val page = FeedPage(
                 videos = ordered,
-                nextCursor = "explore_$nextPageNum",
+                nextCursor = encodeForYouCursor(nextCursorState),
                 hasMore = true
             )
             saveCachedFeed(cacheKey, page)
             page
         }.recoverCatching { throwable ->
-            readCachedFeed(cacheKey, allowExpired = true)?.let {
-                indexVideos(it.videos)
-                return@recoverCatching it
+            readCachedFeed(cacheKey, allowExpired = true)?.let { cached ->
+                val unseen = cached.videos.filterNot { excludeIds.contains(it.id) }.shuffled()
+                val seen = cached.videos.filter { excludeIds.contains(it.id) }.shuffled()
+                val ordered = (unseen + seen).distinctBy { it.id }
+                indexVideos(ordered)
+                return@recoverCatching cached.copy(videos = ordered)
             }
             throw (throwable as? ScraperException)
                 ?: ScraperException(throwable.message ?: "Failed to load For You feed", throwable)
@@ -356,10 +549,10 @@ class ScraperVideoRepository(
                 val collected = collectCategoryVideoRefs(aliases, forceNetwork = forceRefresh)
                 val unseenRefs = collected.filterNot { excludeIds.contains(it.second) }
                 val seenRefs = collected.filter { excludeIds.contains(it.second) }
-                val orderedRefs = if (forceRefresh && unseenRefs.size > 6) {
-                    val head = unseenRefs.take(18).shuffled()
-                    val tail = unseenRefs.drop(18)
-                    head + tail + seenRefs
+                val orderedRefs = if (unseenRefs.size >= ScraperConfig.CATEGORY_PAGE_SIZE) {
+                    if (forceRefresh) unseenRefs.shuffled() else unseenRefs
+                } else if (forceRefresh && unseenRefs.size > 4) {
+                    unseenRefs.shuffled() + seenRefs.shuffled()
                 } else {
                     unseenRefs + seenRefs
                 }
@@ -425,9 +618,12 @@ class ScraperVideoRepository(
             saveCachedFeed(cacheKey, page)
             page
         }.recoverCatching { throwable ->
-            readCachedFeed(cacheKey, allowExpired = true)?.let {
-                indexVideos(it.videos)
-                return@recoverCatching it
+            readCachedFeed(cacheKey, allowExpired = true)?.let { cached ->
+                val unseen = cached.videos.filterNot { excludeIds.contains(it.id) }.shuffled()
+                val seen = cached.videos.filter { excludeIds.contains(it.id) }.shuffled()
+                val ordered = (unseen + seen).distinctBy { it.id }
+                indexVideos(ordered)
+                return@recoverCatching cached.copy(videos = ordered)
             }
             throw (throwable as? ScraperException)
                 ?: ScraperException(throwable.message ?: "Failed to load category", throwable)
@@ -625,7 +821,8 @@ class ScraperVideoRepository(
             return@withContext Result.success(UnifiedSearchResult(query = trimmed))
         }
 
-        val cacheKey = "unified_search_v4_${trimmed.lowercase()}_${cursor ?: "0"}"
+        val region = prefs.getSettings().contentRegion
+        val cacheKey = "unified_search_v5_${region.code}_${trimmed.lowercase()}_${cursor ?: "0"}"
         readCachedUnifiedSearch(cacheKey)?.let { cached ->
             indexVideos(cached.videos)
             return@withContext Result.success(cached)
@@ -635,35 +832,87 @@ class ScraperVideoRepository(
         runCatching {
             val tokens = cleanQuery.lowercase().split(Regex("\\s+")).filter { it.length >= 2 }
 
-            // Paginated load-more path (Infinite Scroll)
+            // Paginated load-more path (True Infinite Scroll across Web Search + Keyword Feed Search + Challenges)
             if (!cursor.isNullOrBlank()) {
                 val state = decodeSearchCursor(cursor)
                     ?: return@runCatching UnifiedSearchResult(query = trimmed, nextCursor = null, hasMore = false)
 
                 val candidateMap = LinkedHashMap<String, VideoItem>()
+                val directIds = HashSet<String>()
                 var nextWebOffset = state.webOffset
                 var webHasMore = false
+                var feedSearchCursor = state.feedSearchCursor
+                var feedSearchHasMore = state.feedSearchHasMore
 
-                if (state.webOffset >= 0) {
-                    val webPage = runCatching {
-                        webSessionClient.searchTikTokWeb(
-                            query = cleanQuery,
-                            searchType = "item",
-                            offset = state.webOffset,
-                            count = 12
-                        )
-                    }.getOrNull()
+                coroutineScope {
+                    val webTask = async {
+                        if (state.webOffset >= 0) {
+                            runCatching {
+                                webSessionClient.searchTikTokWeb(
+                                    query = cleanQuery,
+                                    searchType = "item",
+                                    offset = state.webOffset,
+                                    count = ScraperConfig.SEARCH_PAGE_SIZE,
+                                    regionCode = region.code,
+                                    timeZone = region.timeZone
+                                )
+                            }.getOrNull()
+                        } else null
+                    }
+                    val feedTask = async {
+                        if (state.feedSearchHasMore && state.feedSearchCursor.isNotBlank()) {
+                            fetchSearchFeedApi(
+                                keywords = cleanQuery,
+                                cursor = state.feedSearchCursor,
+                                count = ScraperConfig.SEARCH_PAGE_SIZE
+                            )
+                        } else null
+                    }
+
+                    val webPage = webTask.await()
                     if (webPage != null) {
                         val parsedWeb = parseWebSearchVideos(webPage)
-                        parsedWeb.videos.forEach { candidateMap.putIfAbsent(it.id, it) }
-                        if (parsedWeb.hasMore && parsedWeb.nextOffset > state.webOffset) {
-                            nextWebOffset = parsedWeb.nextOffset
-                            webHasMore = true
+                        parsedWeb.videos.forEach {
+                            candidateMap.putIfAbsent(it.id, it)
+                            directIds.add(it.id)
+                        }
+                        if (parsedWeb.videos.size < 6 && webPage.domVideoRefs.isNotEmpty()) {
+                            val missingRefs = webPage.domVideoRefs
+                                .filterNot { candidateMap.containsKey(it.second) }
+                                .take(12)
+                            hydrateVideoRefs(missingRefs).forEach {
+                                candidateMap.putIfAbsent(it.id, it)
+                                directIds.add(it.id)
+                            }
+                        }
+                        if (parsedWeb.hasMore) {
+                            val computedOffset = if (parsedWeb.nextOffset > state.webOffset) {
+                                parsedWeb.nextOffset
+                            } else {
+                                state.webOffset + maxOf(parsedWeb.videos.size, ScraperConfig.SEARCH_PAGE_SIZE)
+                            }
+                            nextWebOffset = computedOffset
+                            webHasMore = parsedWeb.videos.isNotEmpty()
                         } else {
                             nextWebOffset = -1
                         }
                     } else {
                         nextWebOffset = -1
+                    }
+
+                    val feedPage = feedTask.await()
+                    if (feedPage != null) {
+                        feedPage.videos.forEach {
+                            candidateMap.putIfAbsent(it.id, it)
+                            directIds.add(it.id)
+                        }
+                        val nextC = feedPage.nextCursor.orEmpty()
+                        val more = feedPage.hasMore && nextC.isNotBlank() && nextC != state.feedSearchCursor
+                        feedSearchHasMore = more
+                        feedSearchCursor = if (more) nextC else ""
+                    } else {
+                        feedSearchHasMore = false
+                        feedSearchCursor = ""
                     }
                 }
 
@@ -673,7 +922,7 @@ class ScraperVideoRepository(
                 var chSearchHasMore = state.chSearchHasMore
 
                 var attempts = 0
-                while (candidateMap.size < 18 && attempts < 4) {
+                while (candidateMap.size < ScraperConfig.SEARCH_PAGE_SIZE && attempts < 3) {
                     if (qIdx >= queue.size) {
                         if (chSearchHasMore && chSearchCursor.isNotBlank()) {
                             val extraChallenges = fetchChallengeSearchApi(
@@ -724,17 +973,20 @@ class ScraperVideoRepository(
                 }
 
                 val rankedPage = candidateMap.values.sortedWith(
-                    compareByDescending<VideoItem> { scoreVideoMatch(it, tokens, cleanQuery) }
-                        .thenByDescending { it.stats.viewsCount }
+                    compareByDescending<VideoItem> {
+                        scoreVideoMatch(it, tokens, cleanQuery, isDirectSearch = directIds.contains(it.id))
+                    }.thenByDescending { it.stats.viewsCount }
                 )
                 indexVideos(rankedPage)
 
                 val queueHasMore = qIdx < queue.size && queue.drop(qIdx).any { it.hasMore }
-                val hasNext = webHasMore || queueHasMore || chSearchHasMore
+                val hasNext = webHasMore || feedSearchHasMore || queueHasMore || chSearchHasMore
                 val nextCursorEncoded = if (hasNext) {
                     encodeSearchCursor(
                         SearchCursorState(
                             webOffset = if (webHasMore) nextWebOffset else -1,
+                            feedSearchCursor = if (feedSearchHasMore) feedSearchCursor else "",
+                            feedSearchHasMore = feedSearchHasMore,
                             queue = queue,
                             qIdx = qIdx,
                             chSearchCursor = chSearchCursor,
@@ -753,29 +1005,96 @@ class ScraperVideoRepository(
                 return@runCatching nextResult
             }
 
-            // Initial Search (Page 0) - Real TikTok Web Search + Real Challenges + Real Users
-            val (webRes, usersPage, challengeMatches) = coroutineScope {
+            // Initial Search (Page 0) - Real TikTok Web General + Video Item Search + Keyword Search + Creators + Hashtags
+            val (webGeneralRes, feedSearchPage, usersPage, challengeMatches) = coroutineScope {
                 val wTask = async {
                     runCatching {
                         webSessionClient.searchTikTokWeb(
                             query = cleanQuery,
                             searchType = "general",
                             offset = 0,
-                            count = 12
+                            count = ScraperConfig.SEARCH_PAGE_SIZE,
+                            regionCode = region.code,
+                            timeZone = region.timeZone
                         )
                     }.getOrNull()
                 }
+                val fTask = async {
+                    fetchSearchFeedApi(
+                        keywords = cleanQuery,
+                        cursor = "0",
+                        count = ScraperConfig.SEARCH_PAGE_SIZE
+                    )
+                }
                 val uTask = async { fetchUserSearchPageApi(cleanQuery, count = 20, cursor = "0") }
                 val cTask = async { fetchMatchingChallengesForQuery(cleanQuery, tokens) }
-                Triple(wTask.await(), uTask.await(), cTask.await())
+                Quadruple(wTask.await(), fTask.await(), uTask.await(), cTask.await())
             }
 
             val candidateMap = LinkedHashMap<String, VideoItem>()
-            val webParsed = webRes?.let { parseWebSearchResponse(it) }
-            webParsed?.videos?.forEach { candidateMap[it.id] = it }
+            val directIds = HashSet<String>()
 
+            var webParsed = webGeneralRes?.let { parseWebSearchResponse(it) }
+            webParsed?.videos?.forEach {
+                candidateMap[it.id] = it
+                directIds.add(it.id)
+            }
+
+            // If /search?q= (general) only returned ~4 top cards and /api/search/item/full wasn't captured,
+            // explicitly load TikTok's Videos search tab (/search/video?q=) so we get full video search results!
+            if ((webParsed?.videos?.size ?: 0) < 8) {
+                val webItemRes = runCatching {
+                    webSessionClient.searchTikTokWeb(
+                        query = cleanQuery,
+                        searchType = "item",
+                        offset = 0,
+                        count = ScraperConfig.SEARCH_PAGE_SIZE,
+                        regionCode = region.code,
+                        timeZone = region.timeZone
+                    )
+                }.getOrNull()
+                val itemParsed = webItemRes?.let { parseWebSearchResponse(it) }
+                itemParsed?.videos?.forEach {
+                    candidateMap.putIfAbsent(it.id, it)
+                    directIds.add(it.id)
+                }
+                if (itemParsed != null && itemParsed.videos.isNotEmpty()) {
+                    webParsed = ParsedWebSearchResult(
+                        videos = candidateMap.values.toList(),
+                        users = (webParsed?.users.orEmpty() + itemParsed.users).distinctBy { it.username.lowercase() },
+                        hashtags = (webParsed?.hashtags.orEmpty() + itemParsed.hashtags).distinctBy { it.tag.lowercase() },
+                        liveStreams = (webParsed?.liveStreams.orEmpty() + itemParsed.liveStreams).distinctBy { it.roomId },
+                        nextOffset = maxOf(webParsed?.nextOffset ?: -1, itemParsed.nextOffset, itemParsed.videos.size),
+                        hasMore = (webParsed?.hasMore == true) || itemParsed.hasMore || itemParsed.videos.size >= 8
+                    )
+                } else if (webItemRes != null && webItemRes.domVideoRefs.isNotEmpty() && candidateMap.size < 10) {
+                    hydrateVideoRefs(webItemRes.domVideoRefs.take(15)).forEach {
+                        candidateMap.putIfAbsent(it.id, it)
+                        directIds.add(it.id)
+                    }
+                }
+            }
+
+            // Always include direct keyword search API results on Page 0 (never gated behind < 6!)
+            feedSearchPage?.videos?.forEach {
+                candidateMap.putIfAbsent(it.id, it)
+                directIds.add(it.id)
+            }
+
+            // Hydrate DOM video refs from general search if we still have few videos
+            if (candidateMap.size < 10 && webGeneralRes?.domVideoRefs?.isNotEmpty() == true) {
+                val missing = webGeneralRes.domVideoRefs
+                    .filterNot { candidateMap.containsKey(it.second) }
+                    .take(12)
+                hydrateVideoRefs(missing).forEach {
+                    candidateMap.putIfAbsent(it.id, it)
+                    directIds.add(it.id)
+                }
+            }
+
+            val compact = cleanQuery.lowercase().replace(Regex("[^\\p{L}0-9_]"), "")
             val queue = challengeMatches.challenges
-                .filter { it.userCount > 0 }
+                .filter { it.userCount > 0 && scoreChallengeMatch(it.chaName, it.userCount, tokens, compact) >= 40 }
                 .take(18)
                 .map { ch ->
                     ChallengeQueueEntry(
@@ -787,8 +1106,8 @@ class ScraperVideoRepository(
                 }
                 .toMutableList()
 
-            // Hydrate videos from top matching TikTok hashtags (real videos, never unrelated trending)
-            val initialChallengeCount = minOf(2, queue.size)
+            // Supplement with top tightly-matched TikTok hashtags if needed
+            val initialChallengeCount = if (candidateMap.size < 16) minOf(2, queue.size) else 0
             for (i in 0 until initialChallengeCount) {
                 val entry = queue[i]
                 val posts = fetchChallengePostsApi(
@@ -800,22 +1119,6 @@ class ScraperVideoRepository(
                 val nextC = posts.nextCursor.orEmpty()
                 val more = posts.hasMore && nextC.isNotBlank() && nextC != "0"
                 queue[i] = entry.copy(
-                    cursor = if (more) nextC else "18",
-                    hasMore = more
-                )
-            }
-            if (candidateMap.size < 24 && queue.size > initialChallengeCount) {
-                val extraIdx = initialChallengeCount
-                val entry = queue[extraIdx]
-                val posts = fetchChallengePostsApi(
-                    challengeId = entry.id,
-                    cursor = "0",
-                    count = ScraperConfig.DEFAULT_PAGE_SIZE
-                )
-                posts.videos.forEach { candidateMap.putIfAbsent(it.id, it) }
-                val nextC = posts.nextCursor.orEmpty()
-                val more = posts.hasMore && nextC.isNotBlank() && nextC != "0"
-                queue[extraIdx] = entry.copy(
                     cursor = if (more) nextC else "18",
                     hasMore = more
                 )
@@ -834,22 +1137,19 @@ class ScraperVideoRepository(
                     runCatching { fetchUserProfileInternal(compactSlug, null) }.getOrNull()
                 exactUser != null ->
                     runCatching { fetchUserProfileInternal(exactUser.username, null) }.getOrNull()
-                likelyHandle && candidateMap.size < 6 && compactSlug.isNotBlank() ->
+                likelyHandle && candidateMap.size < 8 && compactSlug.isNotBlank() ->
                     runCatching { fetchUserProfileInternal(compactSlug, null) }.getOrNull()
                 else -> null
             }
-            directCreatorProfile?.videos?.forEach { candidateMap.putIfAbsent(it.id, it) }
-
-            // Fallback: if challenge posts & web search returned very few, try tikwm mirror search if not CF-blocked
-            if (candidateMap.size < 6) {
-                fetchSearchFeedApi(cleanQuery, null)?.videos?.forEach {
-                    candidateMap.putIfAbsent(it.id, it)
-                }
+            directCreatorProfile?.videos?.forEach {
+                candidateMap.putIfAbsent(it.id, it)
+                directIds.add(it.id)
             }
 
             val rankedVideos = candidateMap.values.sortedWith(
-                compareByDescending<VideoItem> { scoreVideoMatch(it, tokens, cleanQuery) }
-                    .thenByDescending { it.stats.viewsCount }
+                compareByDescending<VideoItem> {
+                    scoreVideoMatch(it, tokens, cleanQuery, isDirectSearch = directIds.contains(it.id))
+                }.thenByDescending { it.stats.viewsCount }
             )
             indexVideos(rankedVideos)
 
@@ -902,12 +1202,20 @@ class ScraperVideoRepository(
             }
 
             val firstActiveIdx = queue.indexOfFirst { it.hasMore }
-            val webHasMore = webParsed?.hasMore == true && (webParsed.nextOffset > 0)
-            val hasMore = webHasMore || firstActiveIdx != -1 || challengeMatches.hasMore
+            val webHasMore = webParsed?.hasMore == true && (webParsed?.nextOffset ?: -1) > 0
+            val feedNextCursor = feedSearchPage?.nextCursor.orEmpty()
+            val feedSearchHasMore = feedSearchPage != null &&
+                feedSearchPage.hasMore &&
+                feedNextCursor.isNotBlank() &&
+                feedNextCursor != "0"
+
+            val hasMore = webHasMore || feedSearchHasMore || firstActiveIdx != -1 || challengeMatches.hasMore
             val nextCursorEncoded = if (hasMore) {
                 encodeSearchCursor(
                     SearchCursorState(
                         webOffset = if (webHasMore) (webParsed?.nextOffset ?: -1) else -1,
+                        feedSearchCursor = if (feedSearchHasMore) feedNextCursor else "",
+                        feedSearchHasMore = feedSearchHasMore,
                         queue = queue,
                         qIdx = if (firstActiveIdx != -1) firstActiveIdx else queue.size,
                         chSearchCursor = challengeMatches.nextCursor,
@@ -1663,6 +1971,18 @@ class ScraperVideoRepository(
         }
     }
 
+    override suspend fun clearFeedCache() {
+        withContext(Dispatchers.IO) {
+            memoryCache.keys.filter {
+                it.startsWith("foryou_") || it.startsWith("cat_") || it.startsWith("unified_search_")
+            }.forEach { key ->
+                memoryCache.remove(key)
+                runCatching { File(scraperCacheDir, "${md5(key)}.json").delete() }
+            }
+            categoryRefPools.clear()
+        }
+    }
+
     override suspend fun clearCache(): Long = withContext(Dispatchers.IO) {
         val before = getCacheSizeBytes()
         memoryCache.clear()
@@ -2256,6 +2576,7 @@ class ScraperVideoRepository(
     private fun fetchTikTokExploreApi(
         categoryType: Int,
         cursor: String?,
+        region: ContentRegion = prefs.getSettings().contentRegion,
         forceNetwork: Boolean = false
     ): FeedPage? {
         return runCatching {
@@ -2264,6 +2585,7 @@ class ScraperVideoRepository(
                 ?.addQueryParameter("aid", "1988")
                 ?.addQueryParameter("count", ScraperConfig.DEFAULT_PAGE_SIZE.toString())
                 ?.addQueryParameter("categoryType", categoryType.toString())
+                ?.addQueryParameter("region", region.code)
                 ?.build()
                 ?.toString()
                 ?: return null
@@ -2272,6 +2594,7 @@ class ScraperVideoRepository(
                 acceptJson = true,
                 userAgent = ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE,
                 referer = ScraperConfig.TIKTOK_EXPLORE_URL,
+                acceptLanguage = region.acceptLanguage,
                 bypassHttpCache = forceNetwork
             )
             var root = runCatching { JSONObject(body) }.getOrNull()
@@ -2283,6 +2606,7 @@ class ScraperVideoRepository(
                     acceptJson = true,
                     userAgent = ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE,
                     referer = ScraperConfig.TIKTOK_EXPLORE_URL,
+                    acceptLanguage = region.acceptLanguage,
                     bypassHttpCache = true
                 )
                 root = runCatching { JSONObject(body) }.getOrNull()
@@ -2304,48 +2628,91 @@ class ScraperVideoRepository(
     }
 
     private fun fetchTrendingFeedApi(
-        cursor: String?,
-        randomizeRegion: Boolean = false,
+        regionCode: String = "BD",
+        cursor: String? = null,
+        count: Int = ScraperConfig.DEFAULT_PAGE_SIZE,
         forceNetwork: Boolean = false
     ): FeedPage? {
         if (isEndpointBlocked("tikwm_feed_list")) return null
-        val regions = if (randomizeRegion) {
-            ScraperConfig.TRENDING_REGION_POOL.shuffled().take(3)
-        } else {
-            listOf("US", "GB", "CA")
-        }
-        for (region in regions) {
-            val result = runCatching {
-                val url = ScraperConfig.API_TRENDING_FEED.toHttpUrlOrNull()?.newBuilder()
-                    ?.addQueryParameter("region", region)
-                    ?.addQueryParameter("count", ScraperConfig.DEFAULT_PAGE_SIZE.toString())
-                    ?.apply {
-                        if (!cursor.isNullOrBlank() && !cursor.startsWith("explore_") && !cursor.startsWith("tag_")) {
-                            addQueryParameter("cursor", cursor)
-                        }
+        return runCatching {
+            val url = ScraperConfig.API_TRENDING_FEED.toHttpUrlOrNull()?.newBuilder()
+                ?.addQueryParameter("region", regionCode)
+                ?.addQueryParameter("count", count.toString())
+                ?.apply {
+                    if (!cursor.isNullOrBlank() && cursor != "0" && !cursor.startsWith("explore_") && !cursor.startsWith("tag_")) {
+                        addQueryParameter("cursor", cursor)
                     }
-                    ?.build()
-                    ?.toString()
-                    ?: return@runCatching null
-                val root = apiGetJson(url, endpointKey = "tikwm_feed_list", bypassHttpCache = forceNetwork)
-                extractFeedPageFromMirrorJson(root)
-            }.onFailure { lastApiError = it.message ?: it.javaClass.simpleName }.getOrNull()
-            if (result != null && result.videos.isNotEmpty()) {
-                return result
-            }
-        }
-        return null
+                }
+                ?.build()
+                ?.toString()
+                ?: return@runCatching null
+            val root = apiGetJson(url, endpointKey = "tikwm_feed_list", bypassHttpCache = forceNetwork)
+            extractFeedPageFromMirrorJson(root)
+        }.onFailure { lastApiError = it.message ?: it.javaClass.simpleName }.getOrNull()
     }
 
-    private fun fetchSearchFeedApi(keywords: String, cursor: String?): FeedPage? {
+    private suspend fun fetchRegionTagOrSearchVideos(
+        tag: String,
+        offset: Int = 0,
+        forceNetwork: Boolean = false
+    ): List<VideoItem> {
+        val searchResult = fetchSearchFeedApi(
+            keywords = tag,
+            cursor = offset.toString(),
+            count = 15
+        )?.videos.orEmpty()
+        if (searchResult.isNotEmpty()) return searchResult
+        val refs = fetchTagRefsFromHtml(
+            ScraperConfig.TIKTOK_TAG_URL_TEMPLATE.format(urlEncode(tag)),
+            forceNetwork = forceNetwork
+        ).drop(offset).take(12)
+        return hydrateVideoRefs(refs)
+    }
+
+    private fun interleaveWithRatio(
+        primary: List<VideoItem>,
+        secondary: List<VideoItem>,
+        primaryPerBatch: Int = 3
+    ): List<VideoItem> {
+        if (secondary.isEmpty()) return primary
+        if (primary.isEmpty()) return secondary
+        val out = ArrayList<VideoItem>(primary.size + secondary.size)
+        val seen = HashSet<String>()
+        var pIdx = 0
+        var sIdx = 0
+        while (pIdx < primary.size || sIdx < secondary.size) {
+            var addedPrimary = 0
+            while (pIdx < primary.size && addedPrimary < primaryPerBatch) {
+                val item = primary[pIdx++]
+                if (seen.add(item.id)) {
+                    out.add(item)
+                    addedPrimary++
+                }
+            }
+            if (sIdx < secondary.size) {
+                val mixItem = secondary[sIdx++]
+                if (seen.add(mixItem.id)) {
+                    out.add(mixItem)
+                }
+            }
+        }
+        return out
+    }
+
+    private fun fetchSearchFeedApi(
+        keywords: String,
+        cursor: String?,
+        count: Int = ScraperConfig.SEARCH_PAGE_SIZE
+    ): FeedPage? {
         if (isEndpointBlocked("tikwm_feed_search")) return null
         val cleanCursor = cursor?.takeUnless { it.startsWith("explore_") || it.startsWith("tag_") } ?: "0"
         return runCatching {
             val form = FormBody.Builder()
                 .add("keywords", keywords)
-                .add("count", ScraperConfig.DEFAULT_PAGE_SIZE.toString())
+                .add("count", count.toString())
                 .add("cursor", cleanCursor)
                 .add("web", "1")
+                .add("hd", "1")
                 .build()
             val root = apiPostJson(ScraperConfig.API_SEARCH_FEED, form, endpointKey = "tikwm_feed_search")
             extractFeedPageFromMirrorJson(root)
@@ -2376,17 +2743,24 @@ class ScraperVideoRepository(
     }
 
     private fun apiPostJson(url: String, form: FormBody, endpointKey: String): JSONObject {
-        val text = executePost(url, form)
-        if (isCloudflareChallenge(text)) {
-            markEndpointBlocked(endpointKey)
-            throw ScraperException("Endpoint protected by Cloudflare challenge")
+        repeat(2) { attempt ->
+            val text = executePost(url, form)
+            if (isCloudflareChallenge(text)) {
+                markEndpointBlocked(endpointKey)
+                throw ScraperException("Endpoint protected by Cloudflare challenge")
+            }
+            val root = runCatching { JSONObject(text) }
+                .getOrElse { throw ScraperException("Invalid JSON response from mirror API") }
+            val code = root.optInt("code", -1)
+            if (code == 0) return root
+            val msg = root.optCleanString("msg")
+            if (attempt == 0 && (msg.contains("limit", ignoreCase = true) || msg.contains("frequent", ignoreCase = true))) {
+                Thread.sleep(1350L)
+                return@repeat
+            }
+            throw ScraperException("API error ($code): ${msg.ifBlank { "Unknown error" }}")
         }
-        val root = runCatching { JSONObject(text) }
-            .getOrElse { throw ScraperException("Invalid JSON response from mirror API") }
-        val code = root.optInt("code", -1)
-        if (code == 0) return root
-        val msg = root.optCleanString("msg")
-        throw ScraperException("API error ($code): ${msg.ifBlank { "Unknown error" }}")
+        throw ScraperException("API rate limit exceeded")
     }
 
     private fun apiGetJson(
@@ -2394,23 +2768,30 @@ class ScraperVideoRepository(
         endpointKey: String,
         bypassHttpCache: Boolean = false
     ): JSONObject {
-        val text = executeGet(
-            url = url,
-            acceptJson = true,
-            userAgent = ScraperConfig.HEADER_USER_AGENT_VALUE,
-            referer = "${ScraperConfig.PUBLIC_API_BASE.removeSuffix("/api")}/",
-            bypassHttpCache = bypassHttpCache
-        )
-        if (isCloudflareChallenge(text)) {
-            markEndpointBlocked(endpointKey)
-            throw ScraperException("Endpoint protected by Cloudflare challenge")
+        repeat(2) { attempt ->
+            val text = executeGet(
+                url = url,
+                acceptJson = true,
+                userAgent = ScraperConfig.HEADER_USER_AGENT_VALUE,
+                referer = "${ScraperConfig.PUBLIC_API_BASE.removeSuffix("/api")}/",
+                bypassHttpCache = bypassHttpCache || attempt > 0
+            )
+            if (isCloudflareChallenge(text)) {
+                markEndpointBlocked(endpointKey)
+                throw ScraperException("Endpoint protected by Cloudflare challenge")
+            }
+            val root = runCatching { JSONObject(text) }
+                .getOrElse { throw ScraperException("Invalid JSON response from mirror API") }
+            val code = root.optInt("code", -1)
+            if (code == 0) return root
+            val msg = root.optCleanString("msg")
+            if (attempt == 0 && (msg.contains("limit", ignoreCase = true) || msg.contains("frequent", ignoreCase = true))) {
+                Thread.sleep(1350L)
+                return@repeat
+            }
+            throw ScraperException("API error ($code): ${msg.ifBlank { "Unknown error" }}")
         }
-        val root = runCatching { JSONObject(text) }
-            .getOrElse { throw ScraperException("Invalid JSON response from mirror API") }
-        val code = root.optInt("code", -1)
-        if (code == 0) return root
-        val msg = root.optCleanString("msg")
-        throw ScraperException("API error ($code): ${msg.ifBlank { "Unknown error" }}")
+        throw ScraperException("API rate limit exceeded")
     }
 
     private fun fetchDiscoverWithRelated(url: String): DiscoverResult {
@@ -2682,21 +3063,32 @@ class ScraperVideoRepository(
     }
 
     private fun parseSingleTikTokItem(obj: JSONObject, fallbackId: String): VideoItem? {
-        val id = obj.optCleanString("id").ifBlank { fallbackId }
+        val id = obj.optCleanString("id")
+            .ifBlank { obj.optCleanString("aweme_id") }
+            .ifBlank { fallbackId }
         val videoObj = obj.optJSONObject("video") ?: return null
         val h264Urls = mutableListOf<String>()
         val otherBitrateUrls = mutableListOf<String>()
-        val bitrateInfo = videoObj.optJSONArray("bitrateInfo")
+        val bitrateInfo = videoObj.optJSONArray("bitrateInfo") ?: videoObj.optJSONArray("bit_rate")
         if (bitrateInfo != null) {
             for (b in 0 until bitrateInfo.length()) {
                 val entry = bitrateInfo.optJSONObject(b) ?: continue
-                val codec = entry.optCleanString("CodecType").lowercase()
-                val firstUrl = entry.optJSONObject("PlayAddr")?.optJSONArray("UrlList")
-                    ?.optString(0)?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                val codec = entry.optCleanString("CodecType")
+                    .ifBlank { entry.optCleanString("gear_name") }
+                    .lowercase()
+                val playAddrObj = entry.optJSONObject("PlayAddr") ?: entry.optJSONObject("play_addr")
+                val urlArr = playAddrObj?.optJSONArray("UrlList")
+                    ?: playAddrObj?.optJSONArray("urlList")
+                    ?: playAddrObj?.optJSONArray("url_list")
+                val firstUrl = urlArr?.optString(0)
+                    ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
                     .orEmpty()
                 if (firstUrl.isNotBlank()) {
-                    if (codec.contains("h264") || codec.contains("avc")) h264Urls.add(firstUrl)
-                    else otherBitrateUrls.add(firstUrl)
+                    if (codec.contains("h264") || codec.contains("avc") || entry.optInt("is_bytevc1", 0) == 0) {
+                        h264Urls.add(firstUrl)
+                    } else {
+                        otherBitrateUrls.add(firstUrl)
+                    }
                 }
             }
         }
@@ -2705,18 +3097,34 @@ class ScraperVideoRepository(
                 .ifBlank { extractVideoMediaUrl(videoObj, "PlayAddrStruct") }
                 .ifBlank { extractVideoMediaUrl(videoObj, "play_addr") }
         )
-        val downloadAddr = normalizeUrl(extractVideoMediaUrl(videoObj, "downloadAddr"))
+        val downloadAddr = normalizeUrl(
+            extractVideoMediaUrl(videoObj, "downloadAddr")
+                .ifBlank { extractVideoMediaUrl(videoObj, "download_addr") }
+        )
         val primaryUrl = h264Urls.firstOrNull()
             ?: playAddr.ifBlank { downloadAddr }.ifBlank { otherBitrateUrls.firstOrNull().orEmpty() }
         if (primaryUrl.isBlank()) return null
 
         val authorObj = obj.optJSONObject("author")
-        val authorStatsObj = obj.optJSONObject("authorStats")
-        val username = authorObj?.optCleanString("uniqueId").orEmpty().ifBlank { "creator" }
+        val authorStatsObj = obj.optJSONObject("authorStats") ?: obj.optJSONObject("author_stats")
+        val username = authorObj?.optCleanString("uniqueId").orEmpty()
+            .ifBlank { authorObj?.optCleanString("unique_id").orEmpty() }
+            .ifBlank { "creator" }
         val displayName = authorObj?.optCleanString("nickname").orEmpty().ifBlank { username }
-        val musicObj = obj.optJSONObject("music")
-        val statsObj = obj.optJSONObject("stats")
-        val desc = obj.optCleanString("desc")
+        val musicObj = obj.optJSONObject("music") ?: obj.optJSONObject("music_info")
+        val statsObj = obj.optJSONObject("stats") ?: obj.optJSONObject("statistics")
+        val desc = obj.optCleanString("desc").ifBlank { obj.optCleanString("title") }
+
+        val avatarUrl = normalizeUrl(
+            authorObj?.let { a ->
+                extractVideoMediaUrl(a, "avatarLarger")
+                    .ifBlank { extractVideoMediaUrl(a, "avatarMedium") }
+                    .ifBlank { extractVideoMediaUrl(a, "avatarThumb") }
+                    .ifBlank { extractVideoMediaUrl(a, "avatar_larger") }
+                    .ifBlank { extractVideoMediaUrl(a, "avatar_medium") }
+                    .ifBlank { extractVideoMediaUrl(a, "avatar_thumb") }
+            }.orEmpty()
+        )
 
         return VideoItem(
             id = id,
@@ -2725,52 +3133,65 @@ class ScraperVideoRepository(
             sdVideoUrl = h264Urls.lastOrNull() ?: downloadAddr.ifBlank { playAddr }.ifBlank { primaryUrl },
             coverUrl = normalizeUrl(
                 extractVideoMediaUrl(videoObj, "originCover")
+                    .ifBlank { extractVideoMediaUrl(videoObj, "origin_cover") }
                     .ifBlank { extractVideoMediaUrl(videoObj, "cover") }
                     .ifBlank { extractVideoMediaUrl(videoObj, "dynamicCover") }
+                    .ifBlank { extractVideoMediaUrl(videoObj, "dynamic_cover") }
             ),
             caption = stripTrailingHashtags(desc).ifBlank { desc },
             hashtags = extractHashtags(desc),
             author = Author(
-                id = authorObj?.optCleanString("id").orEmpty().ifBlank { username },
+                id = authorObj?.optCleanString("id")
+                    ?.ifBlank { authorObj.optCleanString("uid") }
+                    .orEmpty().ifBlank { username },
                 username = username,
                 displayName = displayName,
-                avatarUrl = normalizeUrl(
-                    authorObj?.optCleanString("avatarLarger").orEmpty()
-                        .ifBlank { authorObj?.optCleanString("avatarMedium").orEmpty() }
-                        .ifBlank { authorObj?.optCleanString("avatarThumb").orEmpty() }
-                ),
+                avatarUrl = avatarUrl,
                 bio = authorObj?.optCleanString("signature").orEmpty(),
-                verified = authorObj?.optBoolean("verified", false) ?: false,
-                secUid = authorObj?.optCleanString("secUid").orEmpty(),
-                followingCount = authorStatsObj?.optLong("followingCount", 0L)
-                    ?.takeIf { it > 0L } ?: authorObj?.optLong("followingCount", 0L) ?: 0L,
-                followersCount = authorStatsObj?.optLong("followerCount", 0L)
-                    ?.takeIf { it > 0L } ?: authorObj?.optLong("followerCount", 0L) ?: 0L,
-                likesCount = authorStatsObj?.optLong("heartCount", 0L)
-                    ?.takeIf { it > 0L }
+                verified = authorObj?.optBoolean("verified", false) == true ||
+                    authorObj?.optInt("verification_type", 0) == 1,
+                secUid = authorObj?.optCleanString("secUid").orEmpty()
+                    .ifBlank { authorObj?.optCleanString("sec_uid").orEmpty() },
+                followingCount = authorStatsObj?.optLong("followingCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("followingCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("following_count", 0L) ?: 0L,
+                followersCount = authorStatsObj?.optLong("followerCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("followerCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("follower_count", 0L) ?: 0L,
+                likesCount = authorStatsObj?.optLong("heartCount", 0L)?.takeIf { it > 0L }
                     ?: authorStatsObj?.optLong("heart", 0L)?.takeIf { it > 0L }
-                    ?: authorObj?.optLong("heartCount", 0L)
-                    ?: 0L,
-                videoCount = authorStatsObj?.optLong("videoCount", 0L)
-                    ?.takeIf { it > 0L } ?: authorObj?.optLong("videoCount", 0L) ?: 0L
+                    ?: authorObj?.optLong("heartCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("total_favorited", 0L) ?: 0L,
+                videoCount = authorStatsObj?.optLong("videoCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("videoCount", 0L)?.takeIf { it > 0L }
+                    ?: authorObj?.optLong("aweme_count", 0L) ?: 0L
             ),
             music = MusicInfo(
                 id = musicObj?.optCleanString("id").orEmpty(),
                 title = musicObj?.optCleanString("title").orEmpty().ifBlank { "Original Sound" },
-                author = musicObj?.optCleanString("authorName").orEmpty(),
+                author = musicObj?.optCleanString("authorName").orEmpty()
+                    .ifBlank { musicObj?.optCleanString("author").orEmpty() },
                 coverUrl = normalizeUrl(
-                    musicObj?.optCleanString("coverLarge").orEmpty()
-                        .ifBlank { musicObj?.optCleanString("coverMedium").orEmpty() }
+                    musicObj?.let { m ->
+                        extractVideoMediaUrl(m, "coverLarge")
+                            .ifBlank { extractVideoMediaUrl(m, "coverMedium") }
+                            .ifBlank { extractVideoMediaUrl(m, "cover_large") }
+                            .ifBlank { extractVideoMediaUrl(m, "cover_thumb") }
+                    }.orEmpty()
                 )
             ),
             stats = VideoStats(
-                likesCount = statsObj?.optLong("diggCount", 0L) ?: 0L,
-                commentsCount = statsObj?.optLong("commentCount", 0L) ?: 0L,
-                sharesCount = statsObj?.optLong("shareCount", 0L) ?: 0L,
-                viewsCount = statsObj?.optLong("playCount", 0L) ?: 0L
+                likesCount = statsObj?.optLong("diggCount", 0L)?.takeIf { it > 0L }
+                    ?: statsObj?.optLong("digg_count", 0L) ?: 0L,
+                commentsCount = statsObj?.optLong("commentCount", 0L)?.takeIf { it > 0L }
+                    ?: statsObj?.optLong("comment_count", 0L) ?: 0L,
+                sharesCount = statsObj?.optLong("shareCount", 0L)?.takeIf { it > 0L }
+                    ?: statsObj?.optLong("share_count", 0L) ?: 0L,
+                viewsCount = statsObj?.optLong("playCount", 0L)?.takeIf { it > 0L }
+                    ?: statsObj?.optLong("play_count", 0L) ?: 0L
             ),
             shareUrl = ScraperConfig.TIKTOK_VIDEO_SHARE_TEMPLATE.format(username, id),
-            createdAt = obj.optLong("createTime", 0L)
+            createdAt = obj.optLong("createTime", 0L).takeIf { it > 0L } ?: obj.optLong("create_time", 0L)
         )
     }
 
@@ -2937,13 +3358,14 @@ class ScraperVideoRepository(
         acceptJson: Boolean,
         userAgent: String = ScraperConfig.HEADER_USER_AGENT_VALUE,
         referer: String = ScraperConfig.HEADER_REFERER_VALUE,
+        acceptLanguage: String = prefs.getSettings().contentRegion.acceptLanguage,
         bypassHttpCache: Boolean = false
     ): String {
         if (url.startsWith(ScraperConfig.PUBLIC_API_BASE)) throttleApi()
         val builder = Request.Builder()
             .url(url)
             .header(ScraperConfig.HEADER_USER_AGENT_KEY, userAgent)
-            .header(ScraperConfig.HEADER_ACCEPT_LANGUAGE_KEY, ScraperConfig.HEADER_ACCEPT_LANGUAGE_VALUE)
+            .header(ScraperConfig.HEADER_ACCEPT_LANGUAGE_KEY, acceptLanguage)
             .header(ScraperConfig.HEADER_REFERER_KEY, referer)
             .header(
                 ScraperConfig.HEADER_ACCEPT_KEY,
@@ -3019,7 +3441,12 @@ class ScraperVideoRepository(
         return score
     }
 
-    private fun scoreVideoMatch(video: VideoItem, tokens: List<String>, rawQuery: String): Int {
+    private fun scoreVideoMatch(
+        video: VideoItem,
+        tokens: List<String>,
+        rawQuery: String,
+        isDirectSearch: Boolean = false
+    ): Int {
         val qLower = rawQuery.lowercase()
         val compactQ = qLower.replace(Regex("\\s+"), "")
         val caption = video.caption.lowercase()
@@ -3029,19 +3456,19 @@ class ScraperVideoRepository(
         val music = video.music.displayText.lowercase()
         val haystack = "$caption $hashtags $uname $dname $music"
 
-        var score = 0
-        if (uname == qLower || dname == qLower) score += 150
-        if (caption.contains(qLower) || (compactQ.isNotBlank() && hashtags.contains(compactQ))) score += 90
+        var score = if (isDirectSearch) 70 else 0
+        if (uname == qLower || dname == qLower) score += 220
+        if (caption.contains(qLower) || (compactQ.isNotBlank() && hashtags.contains(compactQ))) score += 130
         var matchedTokens = 0
         tokens.forEach { t ->
             if (haystack.contains(t)) matchedTokens++
-            if (uname.contains(t) || dname.contains(t)) score += 25
-            if (hashtags.contains(t)) score += 25
-            if (caption.contains(t)) score += 20
-            if (music.contains(t)) score += 8
+            if (uname.contains(t) || dname.contains(t)) score += 35
+            if (hashtags.contains(t)) score += 30
+            if (caption.contains(t)) score += 28
+            if (music.contains(t)) score += 12
         }
-        if (tokens.size > 1 && matchedTokens == tokens.size) score += 120
-        else if (tokens.size >= 2 && matchedTokens >= 2) score += 45
+        if (tokens.size > 1 && matchedTokens == tokens.size) score += 150
+        else if (tokens.size >= 2 && matchedTokens >= 2) score += 60
         return score
     }
 
@@ -3062,29 +3489,52 @@ class ScraperVideoRepository(
             runCatching {
                 val root = JSONObject(rawJson)
                 val cursorVal = root.optInt("cursor", -1)
-                val moreFlag = root.optInt("has_more", 0) == 1 || root.optBoolean("has_more", false)
-                if (moreFlag && cursorVal > nextOffset) {
-                    nextOffset = cursorVal
+                    .takeIf { it >= 0 }
+                    ?: root.optJSONObject("extra")?.optInt("cursor", -1)
+                    ?: -1
+                val moreFlag = root.optInt("has_more", 0) == 1 ||
+                    root.optBoolean("has_more", false) ||
+                    root.optInt("hasMore", 0) == 1 ||
+                    root.optBoolean("hasMore", false)
+                if (moreFlag) {
                     hasMore = true
+                    if (cursorVal > nextOffset) {
+                        nextOffset = cursorVal
+                    }
                 }
 
                 root.optJSONArray("item_list")?.let { arr ->
+                    parseTikTokJsonArray(arr).forEach { videos.putIfAbsent(it.id, it) }
+                }
+                root.optJSONArray("aweme_list")?.let { arr ->
                     parseTikTokJsonArray(arr).forEach { videos.putIfAbsent(it.id, it) }
                 }
 
                 root.optJSONArray("data")?.let { dataArr ->
                     for (i in 0 until dataArr.length()) {
                         val entry = dataArr.optJSONObject(i) ?: continue
-                        val itemObj = entry.optJSONObject("item") ?: entry.optJSONObject("aweme_info")
+                        val itemObj = entry.optJSONObject("item")
+                            ?: entry.optJSONObject("aweme_info")
+                            ?: entry.optJSONObject("common")?.optJSONObject("item")
+                            ?: entry.takeIf { it.has("video") && (it.has("id") || it.has("aweme_id")) }
                         if (itemObj != null) {
-                            parseSingleTikTokItem(itemObj, fallbackId = itemObj.optCleanString("id"))?.let {
+                            parseSingleTikTokItem(
+                                itemObj,
+                                fallbackId = itemObj.optCleanString("id").ifBlank { itemObj.optCleanString("aweme_id") }
+                            )?.let {
                                 videos.putIfAbsent(it.id, it)
                             }
+                        }
+                        val nestedArr = entry.optJSONArray("item_list")
+                            ?: entry.optJSONArray("items")
+                            ?: entry.optJSONArray("aweme_list")
+                        if (nestedArr != null) {
+                            parseTikTokJsonArray(nestedArr).forEach { videos.putIfAbsent(it.id, it) }
                         }
                         entry.optJSONArray("user_list")?.let { uArr ->
                             for (uIdx in 0 until uArr.length()) {
                                 val uEntry = uArr.optJSONObject(uIdx) ?: continue
-                                val userInfo = uEntry.optJSONObject("user_info") ?: uEntry
+                                val userInfo = uEntry.optJSONObject("user_info") ?: uEntry.optJSONObject("user") ?: uEntry
                                 val uname = userInfo.optCleanString("unique_id").ifBlank { userInfo.optCleanString("uniqueId") }
                                 if (uname.isNotBlank()) {
                                     users.putIfAbsent(uname.lowercase(), buildAuthorFromUserJson(userInfo, uEntry.optJSONObject("stats"), uname))
@@ -3141,6 +3591,10 @@ class ScraperVideoRepository(
         parseSearchJsonPayload(res.rawItemJson)
         parseSearchJsonPayload(res.rawLiveJson)
 
+        if (hasMore && nextOffset <= 0 && videos.isNotEmpty()) {
+            nextOffset = videos.size
+        }
+
         return ParsedWebSearchResult(
             videos = videos.values.toList(),
             users = users.values.toList(),
@@ -3157,6 +3611,14 @@ class ScraperVideoRepository(
     private fun decodeSearchCursor(raw: String): SearchCursorState? = runCatching {
         val json = String(Base64.decode(raw, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
         gson.fromJson(json, SearchCursorState::class.java)
+    }.getOrNull()
+
+    private fun encodeForYouCursor(state: ForYouCursorState): String =
+        Base64.encodeToString(gson.toJson(state).toByteArray(Charsets.UTF_8), Base64.URL_SAFE or Base64.NO_WRAP)
+
+    private fun decodeForYouCursor(raw: String): ForYouCursorState? = runCatching {
+        val json = String(Base64.decode(raw, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+        gson.fromJson(json, ForYouCursorState::class.java)
     }.getOrNull()
 
     private fun resolveCategoryTypeForQuery(query: String): Int? {
@@ -3228,7 +3690,9 @@ class ScraperVideoRepository(
     private fun extractVideoMediaUrl(videoObj: JSONObject, key: String): String {
         val nested = videoObj.optJSONObject(key)
         if (nested != null) {
-            val arr = nested.optJSONArray("UrlList") ?: nested.optJSONArray("urlList")
+            val arr = nested.optJSONArray("UrlList")
+                ?: nested.optJSONArray("urlList")
+                ?: nested.optJSONArray("url_list")
             if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val u = arr.optString(i, "").trim()
@@ -3310,8 +3774,17 @@ class ScraperVideoRepository(
         val cursor: String,
         val hasMore: Boolean
     )
+    private data class ForYouCursorState(
+        val pageNum: Int = 0,
+        val trendingCursor: String = "",
+        val mixCursor: String = "",
+        val tagIdx: Int = 0
+    )
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
     private data class SearchCursorState(
         val webOffset: Int = -1,
+        val feedSearchCursor: String = "",
+        val feedSearchHasMore: Boolean = false,
         val queue: List<ChallengeQueueEntry> = emptyList(),
         val qIdx: Int = 0,
         val chSearchCursor: String = "",

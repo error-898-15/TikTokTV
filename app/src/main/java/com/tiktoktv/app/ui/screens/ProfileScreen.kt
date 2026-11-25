@@ -62,6 +62,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.tiktoktv.app.data.model.ContentRegion
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.ui.ProfileTab
 import com.tiktoktv.app.ui.UiState
@@ -81,6 +82,7 @@ fun ProfileScreen(
     onToggleAutoScroll: () -> Unit,
     onToggleAutoplay: () -> Unit,
     onCycleQuality: () -> Unit,
+    onSelectRegion: (ContentRegion) -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -169,6 +171,7 @@ fun ProfileScreen(
                         onToggleAutoScroll = onToggleAutoScroll,
                         onToggleAutoplay = onToggleAutoplay,
                         onCycleQuality = onCycleQuality,
+                        onSelectRegion = onSelectRegion,
                         onClearCache = onClearCache
                     )
                 }

@@ -62,6 +62,8 @@ interface VideoRepository {
         cursor: String? = null
     ): Result<List<Comment>>
 
+    suspend fun clearFeedCache()
+
     suspend fun clearCache(): Long
 
     suspend fun getCacheSizeBytes(): Long

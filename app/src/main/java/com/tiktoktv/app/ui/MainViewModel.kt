@@ -13,6 +13,7 @@ import com.tiktoktv.app.data.model.AppSettings
 import com.tiktoktv.app.data.model.Author
 import com.tiktoktv.app.data.model.Category
 import com.tiktoktv.app.data.model.Comment
+import com.tiktoktv.app.data.model.ContentRegion
 import com.tiktoktv.app.data.model.HashtagResult
 import com.tiktoktv.app.data.model.LiveStreamItem
 import com.tiktoktv.app.data.model.SearchSuggestion
@@ -310,7 +311,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var attempts = 0
                     var failed = false
 
-                    while (attempts < 3 && collected.size < 6 && hasNextNow && !cursorNow.isNullOrBlank()) {
+                    while (attempts < 4 && collected.size < 18 && hasNextNow && !cursorNow.isNullOrBlank()) {
                         attempts++
                         val res = repo.searchUnified(query, cursor = cursorNow)
                         if (feedSourceMode != FeedSourceMode.SEARCH || _uiState.value.searchQuery.trim() != query) {
@@ -958,7 +959,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = repo.searchUnified(clean)
             if (_uiState.value.searchQuery != clean) return@launch
             result.onSuccess { unified ->
-                val list = hydrateLocalFlags(unified.videos)
+                val combinedVideos = LinkedHashMap<String, VideoItem>()
+                hydrateLocalFlags(unified.videos).forEach { combinedVideos[it.id] = it }
+                var nextCursorNow = unified.nextCursor
+                var hasMoreNow = unified.hasMore && !nextCursorNow.isNullOrBlank()
+                var autoAttempts = 0
+                while (combinedVideos.size < 15 && hasMoreNow && !nextCursorNow.isNullOrBlank() && autoAttempts < 2) {
+                    autoAttempts++
+                    val moreRes = repo.searchUnified(clean, cursor = nextCursorNow)
+                    if (_uiState.value.searchQuery != clean) return@launch
+                    val morePage = moreRes.getOrNull() ?: break
+                    hydrateLocalFlags(morePage.videos).forEach { combinedVideos.putIfAbsent(it.id, it) }
+                    val nextC = morePage.nextCursor
+                    hasMoreNow = morePage.hasMore && !nextC.isNullOrBlank() && nextC != nextCursorNow
+                    nextCursorNow = if (hasMoreNow) nextC else null
+                }
+
+                val list = combinedVideos.values.toList()
                 list.groupBy { it.author.username }.forEach { (uname, vids) ->
                     prefs.recordAuthorVideos(uname, vids)
                 }
@@ -974,8 +991,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         searchLiveStreams = unified.liveStreams,
                         searchHashtags = unified.hashtags,
                         relatedQueries = unified.relatedQueries,
-                        searchNextCursor = unified.nextCursor,
-                        searchHasMore = unified.hasMore && !unified.nextCursor.isNullOrBlank(),
+                        searchNextCursor = nextCursorNow,
+                        searchHasMore = hasMoreNow,
                         searchUsersNextCursor = unified.usersNextCursor,
                         searchUsersHasMore = unified.usersHasMore && !unified.usersNextCursor.isNullOrBlank(),
                         searchHashtagsNextCursor = unified.hashtagsNextCursor,
@@ -1010,7 +1027,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var attempts = 0
             var failed = false
 
-            while (attempts < 3 && aggregated.size < 6 && hasNextNow && !cursorNow.isNullOrBlank()) {
+            while (attempts < 4 && aggregated.size < 18 && hasNextNow && !cursorNow.isNullOrBlank()) {
                 attempts++
                 val result = repo.searchUnified(query, cursor = cursorNow)
                 if (_uiState.value.searchQuery.trim() != query) {
@@ -1142,6 +1159,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.saveSettings(updated)
         playerManager.setQuality(nextQuality)
         _uiState.update { it.copy(settings = updated) }
+    }
+
+    fun selectContentRegion(region: ContentRegion) {
+        val prev = _uiState.value.settings.contentRegion
+        if (prev == region) return
+        val updated = _uiState.value.settings.copy(contentRegion = region)
+        prefs.saveSettings(updated)
+        _uiState.update { it.copy(settings = updated) }
+        showToast("Region set to ${region.shortLabel}")
+        viewModelScope.launch {
+            repo.clearFeedCache()
+            val currentCat = _uiState.value.activeCategory
+            if (currentCat.id == "for_you") {
+                loadCategoryFeed(currentCat, forceRefresh = true)
+            }
+        }
     }
 
     fun clearAllCache() {

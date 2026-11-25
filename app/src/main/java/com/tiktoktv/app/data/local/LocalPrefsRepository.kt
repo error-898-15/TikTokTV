@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.tiktoktv.app.data.model.AppSettings
+import com.tiktoktv.app.data.model.ContentRegion
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.data.model.VideoQuality
 
@@ -18,10 +19,15 @@ class LocalPrefsRepository(context: Context) {
             ?: VideoQuality.AUTO.name
         val quality = runCatching { VideoQuality.valueOf(qualityName) }
             .getOrDefault(VideoQuality.AUTO)
+        val regionName = prefs.getString(KEY_CONTENT_REGION, ContentRegion.BANGLADESH_MIX.name)
+            ?: ContentRegion.BANGLADESH_MIX.name
+        val region = runCatching { ContentRegion.valueOf(regionName) }
+            .getOrDefault(ContentRegion.BANGLADESH_MIX)
         return AppSettings(
             autoScroll = prefs.getBoolean(KEY_AUTO_SCROLL, true),
             autoplay = prefs.getBoolean(KEY_AUTOPLAY, true),
-            videoQuality = quality
+            videoQuality = quality,
+            contentRegion = region
         )
     }
 
@@ -30,7 +36,15 @@ class LocalPrefsRepository(context: Context) {
             .putBoolean(KEY_AUTO_SCROLL, settings.autoScroll)
             .putBoolean(KEY_AUTOPLAY, settings.autoplay)
             .putString(KEY_VIDEO_QUALITY, settings.videoQuality.name)
+            .putString(KEY_CONTENT_REGION, settings.contentRegion.name)
             .apply()
+    }
+
+    fun getAndIncrementFeedCycle(): Int {
+        val current = prefs.getInt(KEY_FEED_CYCLE, 0)
+        val next = (current + 1) % 10000
+        prefs.edit().putInt(KEY_FEED_CYCLE, next).apply()
+        return current
     }
 
     fun getLikedVideoIds(): Set<String> =
@@ -216,6 +230,8 @@ class LocalPrefsRepository(context: Context) {
         private const val KEY_AUTO_SCROLL = "auto_scroll"
         private const val KEY_AUTOPLAY = "autoplay"
         private const val KEY_VIDEO_QUALITY = "video_quality"
+        private const val KEY_CONTENT_REGION = "content_region"
+        private const val KEY_FEED_CYCLE = "feed_cycle_counter"
         private const val KEY_LIKED_IDS = "liked_video_ids"
         private const val KEY_SAVED_IDS = "saved_video_ids"
         private const val KEY_HIDDEN_IDS = "not_interested_ids"
@@ -226,7 +242,7 @@ class LocalPrefsRepository(context: Context) {
         private const val KEY_WATCH_HISTORY_JSON = "watch_history_json"
         private const val KEY_AUTHOR_ARCHIVE_JSON = "author_archive_json"
         private const val KEY_SEARCH_HISTORY_JSON = "search_history_json"
-        private const val MAX_SEEN_IDS = 250
+        private const val MAX_SEEN_IDS = 1000
         private const val MAX_WATCH_HISTORY = 100
         private const val MAX_VIDEOS_PER_AUTHOR = 200
         private const val MAX_SEARCH_HISTORY = 15

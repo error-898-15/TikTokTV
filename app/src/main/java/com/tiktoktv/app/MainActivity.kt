@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
                             onToggleAutoScroll = { viewModel.toggleAutoScroll() },
                             onToggleAutoplay = { viewModel.toggleAutoplay() },
                             onCycleQuality = { viewModel.cycleVideoQuality() },
+                            onSelectRegion = { region -> viewModel.selectContentRegion(region) },
                             onClearCache = { viewModel.clearAllCache() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )
@@ -129,6 +130,7 @@ class MainActivity : ComponentActivity() {
                             onToggleAutoScroll = { viewModel.toggleAutoScroll() },
                             onToggleAutoplay = { viewModel.toggleAutoplay() },
                             onCycleQuality = { viewModel.cycleVideoQuality() },
+                            onSelectRegion = { region -> viewModel.selectContentRegion(region) },
                             onClearCache = { viewModel.clearAllCache() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )

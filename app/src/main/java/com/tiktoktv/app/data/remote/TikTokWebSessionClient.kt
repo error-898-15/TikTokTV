@@ -82,7 +82,13 @@ class TikTokWebSessionClient(
     private var capturedPostParams: Map<String, String> = emptyMap()
 
     @Volatile
+    private var capturedSearchParams: Map<String, String> = emptyMap()
+
+    @Volatile
     private var currentSearchQuery: String = ""
+
+    @Volatile
+    private var currentSearchType: String = ""
 
     @Volatile
     private var pageLoadDeferred: CompletableDeferred<Boolean>? = null
@@ -186,6 +192,10 @@ class TikTokWebSessionClient(
                         capturePostQueryTemplate(uri)
                         return null
                     }
+                    if (urlStr.contains("/api/search/general/full/") || urlStr.contains("/api/search/item/full/")) {
+                        captureSearchQueryTemplate(uri)
+                        return null
+                    }
 
                     val pathLower = uri.path?.lowercase().orEmpty()
                     if (BLOCKED_EXTENSIONS.any { pathLower.endsWith(it) }) {
@@ -228,6 +238,21 @@ class TikTokWebSessionClient(
             }
             if (map.isNotEmpty()) {
                 capturedPostParams = map
+            }
+        }
+    }
+
+    private fun captureSearchQueryTemplate(uri: Uri) {
+        runCatching {
+            val names = uri.queryParameterNames ?: return
+            val map = LinkedHashMap<String, String>()
+            for (name in names) {
+                if (name in STRIPPED_SEARCH_KEYS) continue
+                val value = uri.getQueryParameter(name) ?: continue
+                map[name] = value
+            }
+            if (map.isNotEmpty()) {
+                capturedSearchParams = map
             }
         }
     }
@@ -286,13 +311,19 @@ class TikTokWebSessionClient(
         query: String,
         searchType: String = "general",
         offset: Int = 0,
-        count: Int = 12
+        count: Int = ScraperConfig.SEARCH_PAGE_SIZE,
+        regionCode: String = "BD",
+        timeZone: String = "Asia/Dhaka"
     ): WebSearchSessionResponse? = sessionMutex.withLock {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return@withLock null
 
         val view = ensureWebViewOnMain(useDesktopUa = true) ?: return@withLock null
-        val isNewSearch = !currentSearchQuery.equals(cleanQuery, ignoreCase = true) || offset == 0 || !currentUseDesktopUa
+        val normalizedType = if (searchType == "video") "item" else searchType
+        val isNewSearch = !currentSearchQuery.equals(cleanQuery, ignoreCase = true) ||
+            (offset == 0 && currentSearchType != normalizedType) ||
+            offset == 0 ||
+            !currentUseDesktopUa
         if (isNewSearch) {
             currentUsername = ""
             currentSecUid = ""
@@ -301,8 +332,10 @@ class TikTokWebSessionClient(
             currentPageReady = false
             currentUseDesktopUa = true
             currentSearchQuery = cleanQuery
+            currentSearchType = normalizedType
+            capturedSearchParams = emptyMap()
 
-            val targetUrl = if (searchType == "item" || searchType == "video") {
+            val targetUrl = if (normalizedType == "item") {
                 ScraperConfig.TIKTOK_SEARCH_VIDEO_URL_TEMPLATE.format(Uri.encode(cleanQuery))
             } else {
                 ScraperConfig.TIKTOK_SEARCH_URL_TEMPLATE.format(Uri.encode(cleanQuery))
@@ -314,19 +347,26 @@ class TikTokWebSessionClient(
                 pageLoadDeferred = deferred
                 view.loadUrl(targetUrl)
             }
-            withTimeoutOrNull(12_000L) { deferred.await() }
+            withTimeoutOrNull(13_000L) { deferred.await() }
             pageLoadDeferred = null
         }
+
+        val capturedSearchJson = JSONObject().apply {
+            capturedSearchParams.forEach { (k, v) -> put(k, v) }
+        }.toString()
 
         val rawResult = evalAsyncJs(
             scriptBody = buildSearchWebScript(
                 query = cleanQuery,
-                searchType = searchType,
+                searchType = normalizedType,
                 offset = offset,
                 count = count,
+                regionCode = regionCode,
+                timeZone = timeZone,
+                capturedTemplateJson = capturedSearchJson,
                 fallbackSdkUrl = ScraperConfig.WEBMSSDK_FALLBACK_URL
             ),
-            timeoutMs = 14_000L,
+            timeoutMs = 16_000L,
             useDesktopUa = true
         )
         syncCookiesFromManager()
@@ -583,7 +623,9 @@ class TikTokWebSessionClient(
             currentPageReady = false
             currentUseDesktopUa = false
             currentSearchQuery = ""
+            currentSearchType = ""
             capturedPostParams = emptyMap()
+            capturedSearchParams = emptyMap()
             withContext(Dispatchers.Main) {
                 runCatching {
                     webView?.stopLoading()
@@ -605,10 +647,14 @@ class TikTokWebSessionClient(
         searchType: String,
         offset: Int,
         count: Int,
+        regionCode: String,
+        timeZone: String,
+        capturedTemplateJson: String,
         fallbackSdkUrl: String
     ): String = """
         $NETWORK_SNIFFER_BOOTSTRAP_JS
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const capturedTemplate = ${if (capturedTemplateJson.isBlank()) "{}" else capturedTemplateJson};
         const collectDomRefs = () => {
           const out = [];
           const seen = new Set();
@@ -627,7 +673,7 @@ class TikTokWebSessionClient(
           return out;
         };
 
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 24; i++) {
           const hasCap = Boolean(window.__TT_CAPTURED_SEARCH_GENERAL || window.__TT_CAPTURED_SEARCH_ITEM);
           const ac = window.byted_acrawler;
           if (hasCap && ac) break;
@@ -651,7 +697,7 @@ class TikTokWebSessionClient(
                         '/api/search/live/full/',
                         '/api/post/item_list/'
                       ],
-                      region: 'US',
+                      region: ${JSONObject.quote(regionCode)},
                       isSDK: false
                     });
                   }
@@ -674,7 +720,13 @@ class TikTokWebSessionClient(
         const msTokenMatch = document.cookie.match(/(?:^|;\s*)msToken=([^;]+)/);
 
         const buildSearchParams = () => {
-          const p = new URLSearchParams({
+          const p = new URLSearchParams();
+          for (const [k, v] of Object.entries(capturedTemplate || {})) {
+            if (v !== undefined && v !== null && String(v).length > 0) {
+              p.set(k, String(v));
+            }
+          }
+          const defaults = {
             WebIdLastTime: String(appCtx.webIdCreatedTime || Math.floor(Date.now() / 1000)),
             aid: '1988',
             app_language: String(appCtx.language || 'en'),
@@ -686,30 +738,47 @@ class TikTokWebSessionClient(
             browser_version: String(navigator.appVersion || '5.0'),
             channel: 'tiktok_web',
             cookie_enabled: String(navigator.cookieEnabled),
-            count: String($count),
-            device_id: String(appCtx.wid || ''),
             device_platform: 'web_pc',
             focus_state: 'true',
             from_page: 'search',
             history_len: String(window.history.length || 1),
             is_fullscreen: 'false',
             is_page_visible: 'true',
-            keyword: ${JSONObject.quote(query)},
             language: String(appCtx.language || 'en'),
-            offset: String($offset),
             os: 'windows',
-            priority_region: '',
-            region: String(appCtx.region || 'US'),
+            priority_region: ${JSONObject.quote(regionCode)},
+            region: String(appCtx.region || ${JSONObject.quote(regionCode)}),
             screen_height: String(screen.height || 1080),
             screen_width: String(screen.width || 1920),
             search_source: 'normal_search',
-            tz_name: String((Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'America/New_York'),
+            tz_name: ${JSONObject.quote(timeZone)},
             user_is_login: 'false',
             webcast_language: String(appCtx.language || 'en')
-          });
-          if (appCtx.odinId) p.set('odinId', String(appCtx.odinId));
+          };
+          for (const [k, v] of Object.entries(defaults)) {
+            if (!p.has(k) && v) p.set(k, v);
+          }
+          if (appCtx.wid && !p.has('device_id')) p.set('device_id', String(appCtx.wid));
+          if (appCtx.odinId && !p.has('odinId')) p.set('odinId', String(appCtx.odinId));
+          if (window.__TT_CAPTURED_SEARCH_ID && !p.has('search_id')) {
+            p.set('search_id', String(window.__TT_CAPTURED_SEARCH_ID));
+          }
+          p.set('keyword', ${JSONObject.quote(query)});
+          p.set('offset', String($offset));
+          p.set('cursor', String($offset));
+          p.set('count', String($count));
           if (msTokenMatch && msTokenMatch[1]) p.set('msToken', decodeURIComponent(msTokenMatch[1]));
           return p.toString();
+        };
+
+        const hasSearchItems = (txt) => {
+          if (!txt || !txt.trim().startsWith('{')) return false;
+          try {
+            const j = JSON.parse(txt);
+            return (Array.isArray(j.data) && j.data.length > 0) ||
+                   (Array.isArray(j.item_list) && j.item_list.length > 0) ||
+                   (Array.isArray(j.aweme_list) && j.aweme_list.length > 0);
+          } catch (e) { return false; }
         };
 
         const signedFetch = async (endpointPath) => {
@@ -746,14 +815,34 @@ class TikTokWebSessionClient(
         let userJson = ($offset === 0 && window.__TT_CAPTURED_SEARCH_USER) ? window.__TT_CAPTURED_SEARCH_USER : '';
         let liveJson = ($offset === 0 && window.__TT_CAPTURED_SEARCH_LIVE) ? window.__TT_CAPTURED_SEARCH_LIVE : '';
 
-        if (!generalJson && ${JSONObject.quote(searchType)} === 'general') {
-          generalJson = await signedFetch('/api/search/general/full/');
-        }
-        if (!itemJson) {
+        if ($offset > 0) {
+          window.__TT_CAPTURED_SEARCH_LATEST = '';
           itemJson = await signedFetch('/api/search/item/full/');
-        }
-        if (!liveJson && $offset === 0) {
-          liveJson = await signedFetch('/api/search/live/full/');
+          if (!hasSearchItems(itemJson)) {
+            generalJson = await signedFetch('/api/search/general/full/');
+          }
+          if (!hasSearchItems(itemJson) && !hasSearchItems(generalJson)) {
+            try {
+              window.scrollTo(0, document.body ? document.body.scrollHeight : 4000);
+              for (let s = 0; s < 10; s++) {
+                if (window.__TT_CAPTURED_SEARCH_LATEST) break;
+                await sleep(150);
+              }
+              if (window.__TT_CAPTURED_SEARCH_LATEST) {
+                itemJson = window.__TT_CAPTURED_SEARCH_LATEST;
+              }
+            } catch (e) {}
+          }
+        } else {
+          if (!generalJson && ${JSONObject.quote(searchType)} === 'general') {
+            generalJson = await signedFetch('/api/search/general/full/');
+          }
+          if (!hasSearchItems(itemJson)) {
+            itemJson = await signedFetch('/api/search/item/full/');
+          }
+          if (!liveJson) {
+            liveJson = await signedFetch('/api/search/live/full/');
+          }
         }
 
         return {
@@ -1192,6 +1281,7 @@ class TikTokWebSessionClient(
 
     private companion object {
         val STRIPPED_QUERY_KEYS = setOf("X-Bogus", "X-Gnarly", "_signature", "cursor", "count")
+        val STRIPPED_SEARCH_KEYS = setOf("X-Bogus", "X-Gnarly", "_signature", "offset", "cursor", "count")
         val BLOCKED_EXTENSIONS = listOf(
             ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico",
             ".mp4", ".m4a", ".mp3", ".webm", ".m3u8", ".ts",
@@ -1230,6 +1320,11 @@ class TikTokWebSessionClient(
                   if (!text || typeof text !== 'string' || !text.trim().startsWith('{')) return;
                   const parsed = JSON.parse(text);
                   if (url && isSearchApi(url)) {
+                    try {
+                      const sid = (parsed.log_pb && parsed.log_pb.impr_id) || (parsed.extra && parsed.extra.search_id) || parsed.search_id || '';
+                      if (sid) window.__TT_CAPTURED_SEARCH_ID = String(sid);
+                    } catch (e) {}
+                    window.__TT_CAPTURED_SEARCH_LATEST = text;
                     if (url.indexOf('/api/search/general/full/') !== -1 && !window.__TT_CAPTURED_SEARCH_GENERAL) {
                       window.__TT_CAPTURED_SEARCH_GENERAL = text;
                     } else if (url.indexOf('/api/search/item/full/') !== -1 && !window.__TT_CAPTURED_SEARCH_ITEM) {

@@ -176,10 +176,173 @@ data class UnifiedSearchResult(
     val hashtagsHasMore: Boolean = false
 )
 
+enum class ContentRegion(
+    val code: String,
+    val label: String,
+    val shortLabel: String,
+    val acceptLanguage: String,
+    val timeZone: String,
+    val discoveryHashtags: List<String>
+) {
+    BANGLADESH_MIX(
+        code = "BD",
+        label = "Bangladesh & Mix (Default)",
+        shortLabel = "BD + Mix",
+        acceptLanguage = "bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7",
+        timeZone = "Asia/Dhaka",
+        discoveryHashtags = listOf("bangladesh", "banglatiktok", "bdfyp", "dhaka", "bangla", "bd")
+    ),
+    BANGLADESH(
+        code = "BD",
+        label = "Bangladesh Only",
+        shortLabel = "Bangladesh (BD)",
+        acceptLanguage = "bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.7",
+        timeZone = "Asia/Dhaka",
+        discoveryHashtags = listOf("bangladesh", "banglatiktok", "bdfyp", "dhaka", "bangla", "bangladeshi")
+    ),
+    INDIA(
+        code = "IN",
+        label = "India",
+        shortLabel = "India (IN)",
+        acceptLanguage = "en-IN,hi-IN;q=0.9,en;q=0.8",
+        timeZone = "Asia/Kolkata",
+        discoveryHashtags = listOf("india", "indiatiktok", "indian", "bollywood", "desi")
+    ),
+    PAKISTAN(
+        code = "PK",
+        label = "Pakistan",
+        shortLabel = "Pakistan (PK)",
+        acceptLanguage = "en-PK,ur-PK;q=0.9,en;q=0.8",
+        timeZone = "Asia/Karachi",
+        discoveryHashtags = listOf("pakistan", "pakistantiktok", "pakistani", "lahore", "karachi")
+    ),
+    UNITED_STATES(
+        code = "US",
+        label = "United States",
+        shortLabel = "United States (US)",
+        acceptLanguage = "en-US,en;q=0.9",
+        timeZone = "America/New_York",
+        discoveryHashtags = listOf("fyp", "foryou", "usa", "viral")
+    ),
+    UNITED_KINGDOM(
+        code = "GB",
+        label = "United Kingdom",
+        shortLabel = "United Kingdom (GB)",
+        acceptLanguage = "en-GB,en;q=0.9",
+        timeZone = "Europe/London",
+        discoveryHashtags = listOf("uk", "uktiktok", "london", "british")
+    ),
+    CANADA(
+        code = "CA",
+        label = "Canada",
+        shortLabel = "Canada (CA)",
+        acceptLanguage = "en-CA,en;q=0.9",
+        timeZone = "America/Toronto",
+        discoveryHashtags = listOf("canada", "canadatiktok", "toronto")
+    ),
+    AUSTRALIA(
+        code = "AU",
+        label = "Australia",
+        shortLabel = "Australia (AU)",
+        acceptLanguage = "en-AU,en;q=0.9",
+        timeZone = "Australia/Sydney",
+        discoveryHashtags = listOf("australia", "aussie", "sydney")
+    ),
+    MALAYSIA(
+        code = "MY",
+        label = "Malaysia",
+        shortLabel = "Malaysia (MY)",
+        acceptLanguage = "ms-MY,en-MY;q=0.9,en;q=0.8",
+        timeZone = "Asia/Kuala_Lumpur",
+        discoveryHashtags = listOf("malaysia", "malaysiatiktok", "fypmalaysia")
+    ),
+    INDONESIA(
+        code = "ID",
+        label = "Indonesia",
+        shortLabel = "Indonesia (ID)",
+        acceptLanguage = "id-ID,id;q=0.9,en;q=0.8",
+        timeZone = "Asia/Jakarta",
+        discoveryHashtags = listOf("indonesia", "fypindonesia", "tiktokindonesia")
+    ),
+    SINGAPORE(
+        code = "SG",
+        label = "Singapore",
+        shortLabel = "Singapore (SG)",
+        acceptLanguage = "en-SG,en;q=0.9",
+        timeZone = "Asia/Singapore",
+        discoveryHashtags = listOf("singapore", "sgtiktok")
+    ),
+    UAE(
+        code = "AE",
+        label = "United Arab Emirates",
+        shortLabel = "UAE (AE)",
+        acceptLanguage = "ar-AE,en-AE;q=0.9,en;q=0.8",
+        timeZone = "Asia/Dubai",
+        discoveryHashtags = listOf("dubai", "uae", "emirates")
+    ),
+    SAUDI_ARABIA(
+        code = "SA",
+        label = "Saudi Arabia",
+        shortLabel = "Saudi Arabia (SA)",
+        acceptLanguage = "ar-SA,en;q=0.8",
+        timeZone = "Asia/Riyadh",
+        discoveryHashtags = listOf("saudi", "ksa", "riyadh")
+    ),
+    JAPAN(
+        code = "JP",
+        label = "Japan",
+        shortLabel = "Japan (JP)",
+        acceptLanguage = "ja-JP,ja;q=0.9,en;q=0.8",
+        timeZone = "Asia/Tokyo",
+        discoveryHashtags = listOf("japan", "japantiktok", "tokyo")
+    ),
+    SOUTH_KOREA(
+        code = "KR",
+        label = "South Korea",
+        shortLabel = "South Korea (KR)",
+        acceptLanguage = "ko-KR,ko;q=0.9,en;q=0.8",
+        timeZone = "Asia/Seoul",
+        discoveryHashtags = listOf("korea", "kpop", "seoul")
+    ),
+    GERMANY(
+        code = "DE",
+        label = "Germany",
+        shortLabel = "Germany (DE)",
+        acceptLanguage = "de-DE,de;q=0.9,en;q=0.8",
+        timeZone = "Europe/Berlin",
+        discoveryHashtags = listOf("deutschland", "germany", "fypdeutschland")
+    ),
+    FRANCE(
+        code = "FR",
+        label = "France",
+        shortLabel = "France (FR)",
+        acceptLanguage = "fr-FR,fr;q=0.9,en;q=0.8",
+        timeZone = "Europe/Paris",
+        discoveryHashtags = listOf("france", "pourtoi", "paris")
+    ),
+    BRAZIL(
+        code = "BR",
+        label = "Brazil",
+        shortLabel = "Brazil (BR)",
+        acceptLanguage = "pt-BR,pt;q=0.9,en;q=0.8",
+        timeZone = "America/Sao_Paulo",
+        discoveryHashtags = listOf("brasil", "brazil", "fypbrasil")
+    ),
+    GLOBAL_MIX(
+        code = "GLOBAL",
+        label = "Global Mix",
+        shortLabel = "Global Mix",
+        acceptLanguage = "en-US,en;q=0.9",
+        timeZone = "UTC",
+        discoveryHashtags = listOf("fyp", "foryou", "viral", "trending")
+    )
+}
+
 data class AppSettings(
     val autoScroll: Boolean = true,
     val autoplay: Boolean = true,
-    val videoQuality: VideoQuality = VideoQuality.AUTO
+    val videoQuality: VideoQuality = VideoQuality.AUTO,
+    val contentRegion: ContentRegion = ContentRegion.BANGLADESH_MIX
 )
 
 class ScraperException(

@@ -52,7 +52,8 @@ object ScraperConfig {
     const val MEMORY_CACHE_TTL_MS = 3 * 60 * 1000L // 3 minutes (never blocks fresh launch)
     const val DISK_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
     const val BLOCKED_ENDPOINT_COOLDOWN_MS = 5 * 60 * 1000L // 5 min circuit breaker for CF-blocked routes
-    const val DEFAULT_PAGE_SIZE = 18
+    const val DEFAULT_PAGE_SIZE = 20
+    const val SEARCH_PAGE_SIZE = 24
     const val CATEGORY_PAGE_SIZE = 15
     const val PROFILE_INITIAL_BATCH_SIZE = 30
     const val PROFILE_CREATOR_PAGE_SIZE = 15
@@ -62,9 +63,12 @@ object ScraperConfig {
     const val WEBMSSDK_FALLBACK_URL =
         "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/webmssdk/1.0.0.422/webmssdk.js"
 
-    // Region pool rotated on every launch/refresh for fresh content
+    // Region pool prioritized for Bangladesh + South Asia + global mix
     val TRENDING_REGION_POOL: List<String> = listOf(
-        "US", "GB", "CA", "AU", "SG", "DE", "FR", "BR", "JP", "ID"
+        "BD", "IN", "PK", "MY", "ID", "SG", "AE", "US", "GB", "CA", "AU", "JP", "KR", "DE", "FR", "BR"
+    )
+    val GLOBAL_MIX_REGION_POOL: List<String> = listOf(
+        "IN", "PK", "MY", "ID", "SG", "AE", "US", "GB", "CA", "AU", "JP", "KR", "BR"
     )
 
     // HTTP Headers
