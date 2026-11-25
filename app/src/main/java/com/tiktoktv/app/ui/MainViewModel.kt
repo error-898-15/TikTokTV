@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class AppScreen {
@@ -116,6 +117,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var suggestionJob: Job? = null
     private var feedLoadJob: Job? = null
     private var profileLoadJob: Job? = null
+    private var profileAutoLoadJob: Job? = null
 
     private val _uiState = MutableStateFlow(
         UiState(
@@ -154,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openCategoryScreen() {
         playerManager.pause()
+        profileAutoLoadJob?.cancel()
         _uiState.update {
             it.copy(currentScreen = AppScreen.CATEGORY_PICKER, overlayMode = FeedOverlayMode.NONE)
         }
@@ -429,6 +432,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openAuthorProfile(author: Author) {
         playerManager.pause()
         profileLoadJob?.cancel()
+        profileAutoLoadJob?.cancel()
         _uiState.update {
             it.copy(
                 currentScreen = AppScreen.PROFILE,
@@ -450,6 +454,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openOwnProfile(initialTab: ProfileTab = ProfileTab.PROFILE) {
         playerManager.pause()
         profileLoadJob?.cancel()
+        profileAutoLoadJob?.cancel()
         val saved = prefs.getSavedVideos()
         val liked = prefs.getLikedVideos()
         val history = prefs.getWatchHistory()
@@ -513,37 +518,128 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadMoreProfileVideos() {
         val state = _uiState.value
         val username = state.profileAuthor?.username ?: return
-        val cursor = state.profileNextCursor ?: return
-        if (state.isProfileLoadingMore || !state.profileHasMore) return
-
+        if (state.isProfileLoadingMore || !state.profileHasMore || state.profileNextCursor.isNullOrBlank()) return
         viewModelScope.launch {
-            _uiState.update { it.copy(isProfileLoadingMore = true) }
-            val result = repo.getUserProfile(username, cursor = cursor, forceRefresh = false)
-            result.onSuccess { res ->
-                val cleanTarget = username.trim().removePrefix("@")
-                val existingIds = _uiState.value.profileVideos.map { it.id }.toSet()
-                val newOnes = hydrateLocalFlags(res.videos)
-                    .filter { it.author.username.equals(cleanTarget, ignoreCase = true) || it.author.username.equals(res.author.username, ignoreCase = true) }
-                    .filterNot { existingIds.contains(it.id) }
-                prefs.recordAuthorVideos(res.author.username, newOnes)
-                _uiState.update { current ->
-                    current.copy(
-                        isProfileLoadingMore = false,
-                        profileVideos = current.profileVideos + newOnes,
-                        profileNextCursor = res.nextCursor,
-                        profileHasMore = res.hasMore && !res.nextCursor.isNullOrBlank()
-                    )
+            loadMoreProfilePageInternal(username)
+        }
+    }
+
+    private fun startProfileAutoLoader(targetUsername: String) {
+        profileAutoLoadJob?.cancel()
+        val cleanTarget = targetUsername.trim().removePrefix("@")
+        if (cleanTarget.isBlank()) return
+
+        profileAutoLoadJob = viewModelScope.launch {
+            var zeroNewStreak = 0
+            var steps = 0
+            while (isActive && steps < 200) {
+                val state = _uiState.value
+                if (state.currentScreen != AppScreen.PROFILE ||
+                    state.isOwnProfile ||
+                    !state.profileHasMore ||
+                    state.profileNextCursor.isNullOrBlank()
+                ) {
+                    break
                 }
-            }.onFailure {
-                _uiState.update { it.copy(isProfileLoadingMore = false) }
+                val activeUser = state.profileAuthor?.username?.trim()?.removePrefix("@").orEmpty()
+                if (!activeUser.equals(cleanTarget, ignoreCase = true)) {
+                    break
+                }
+
+                val step = loadMoreProfilePageInternal(activeUser)
+                steps++
+                if (!step.advanced || !step.hasMore) {
+                    break
+                }
+                if (step.newCount == 0) {
+                    zeroNewStreak++
+                    if (zeroNewStreak >= 3) {
+                        _uiState.update { it.copy(profileHasMore = false, profileNextCursor = null) }
+                        break
+                    }
+                } else {
+                    zeroNewStreak = 0
+                }
+                delay(150L)
             }
         }
     }
 
+    private data class ProfilePageStepResult(
+        val advanced: Boolean,
+        val newCount: Int,
+        val hasMore: Boolean
+    )
+
+    private suspend fun loadMoreProfilePageInternal(username: String): ProfilePageStepResult {
+        val state = _uiState.value
+        val cursor = state.profileNextCursor ?: return ProfilePageStepResult(false, 0, false)
+        if (state.isProfileLoadingMore || !state.profileHasMore) {
+            return ProfilePageStepResult(false, 0, state.profileHasMore)
+        }
+
+        _uiState.update { it.copy(isProfileLoadingMore = true) }
+        val result = repo.getUserProfile(username, cursor = cursor, forceRefresh = false)
+        var stepResult = ProfilePageStepResult(false, 0, false)
+
+        result.onSuccess { res ->
+            val cleanTarget = username.trim().removePrefix("@")
+            val activeAuthorNow = _uiState.value.profileAuthor?.username?.trim()?.removePrefix("@").orEmpty()
+            if (!activeAuthorNow.equals(cleanTarget, ignoreCase = true)) {
+                _uiState.update { it.copy(isProfileLoadingMore = false) }
+                stepResult = ProfilePageStepResult(false, 0, false)
+                return@onSuccess
+            }
+
+            val existingIds = _uiState.value.profileVideos.map { it.id }.toSet()
+            val newOnes = hydrateLocalFlags(res.videos)
+                .filter {
+                    it.author.username.equals(cleanTarget, ignoreCase = true) ||
+                        it.author.username.equals(res.author.username, ignoreCase = true)
+                }
+                .filterNot { existingIds.contains(it.id) }
+                .distinctBy { it.id }
+
+            if (newOnes.isNotEmpty()) {
+                prefs.recordAuthorVideos(res.author.username.ifBlank { cleanTarget }, newOnes)
+            }
+
+            val nextCursorValid = res.hasMore && !res.nextCursor.isNullOrBlank() && res.nextCursor != cursor
+            _uiState.update { current ->
+                val curAuthor = current.profileAuthor
+                val updatedAuthor = if (curAuthor != null) {
+                    curAuthor.copy(
+                        videoCount = maxOf(curAuthor.videoCount, res.author.videoCount),
+                        followersCount = maxOf(curAuthor.followersCount, res.author.followersCount),
+                        likesCount = maxOf(curAuthor.likesCount, res.author.likesCount),
+                        avatarUrl = curAuthor.avatarUrl.ifBlank { res.author.avatarUrl }
+                    )
+                } else res.author
+                current.copy(
+                    isProfileLoadingMore = false,
+                    profileAuthor = updatedAuthor,
+                    profileVideos = (current.profileVideos + newOnes).distinctBy { it.id },
+                    profileNextCursor = if (nextCursorValid) res.nextCursor else null,
+                    profileHasMore = nextCursorValid
+                )
+            }
+            stepResult = ProfilePageStepResult(
+                advanced = true,
+                newCount = newOnes.size,
+                hasMore = nextCursorValid
+            )
+        }.onFailure {
+            _uiState.update { it.copy(isProfileLoadingMore = false) }
+            stepResult = ProfilePageStepResult(false, 0, false)
+        }
+        return stepResult
+    }
+
     private fun loadProfileData(username: String, forceRefresh: Boolean = false) {
         profileLoadJob?.cancel()
+        profileAutoLoadJob?.cancel()
         profileLoadJob = viewModelScope.launch {
-            _uiState.update { it.copy(isProfileLoading = true, profileError = null) }
+            _uiState.update { it.copy(isProfileLoading = true, isProfileLoadingMore = false, profileError = null) }
             val result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
 
@@ -576,15 +672,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     likesCount = maxOf(res.author.likesCount, existingAuthor?.likesCount ?: 0L),
                     videoCount = maxOf(res.author.videoCount, existingAuthor?.videoCount ?: 0L)
                 )
+                val hasMorePages = res.hasMore && !res.nextCursor.isNullOrBlank()
                 _uiState.update {
                     it.copy(
                         isProfileLoading = false,
                         profileAuthor = mergedAuthor,
                         profileVideos = hydrateLocalFlags(mergedVideos),
-                        profileNextCursor = res.nextCursor,
-                        profileHasMore = res.hasMore && !res.nextCursor.isNullOrBlank(),
+                        profileNextCursor = if (hasMorePages) res.nextCursor else null,
+                        profileHasMore = hasMorePages,
                         profileError = null
                     )
+                }
+                if (hasMorePages && !_uiState.value.isOwnProfile) {
+                    startProfileAutoLoader(mergedAuthor.username.ifBlank { cleanTarget })
                 }
             }.onFailure { err ->
                 val archivedVideos = prefs.getAuthorVideoHistory(cleanTarget)
@@ -629,6 +729,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSearch() {
         playerManager.pause()
+        profileAutoLoadJob?.cancel()
         refreshSuggestions(_uiState.value.searchQuery)
         _uiState.update {
             it.copy(
@@ -701,6 +802,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSettingsScreen() {
         playerManager.pause()
+        profileAutoLoadJob?.cancel()
         refreshCacheSize()
         _uiState.update {
             it.copy(currentScreen = AppScreen.SETTINGS, overlayMode = FeedOverlayMode.NONE)
@@ -708,6 +810,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun navigateBackToFeed() {
+        profileAutoLoadJob?.cancel()
         _uiState.update {
             it.copy(currentScreen = AppScreen.HOME_FEED, overlayMode = FeedOverlayMode.NONE)
         }
@@ -808,6 +911,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        profileAutoLoadJob?.cancel()
         playerManager.pause()
     }
 }
