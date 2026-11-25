@@ -66,10 +66,12 @@ data class UiState(
     val feedError: String? = null,
     val nextCursor: String? = null,
     val hasMore: Boolean = true,
+
     // Comments
     val comments: List<Comment> = emptyList(),
     val isCommentsLoading: Boolean = false,
     val commentsError: String? = null,
+
     // Profile & History
     val profileTab: ProfileTab = ProfileTab.PROFILE,
     val profileAuthor: Author? = null,
@@ -83,6 +85,7 @@ data class UiState(
     val likedVideos: List<VideoItem> = emptyList(),
     val savedVideos: List<VideoItem> = emptyList(),
     val watchHistory: List<VideoItem> = emptyList(),
+
     // Search & Live Suggestions + Tabs
     val searchQuery: String = "",
     val activeSearchTab: SearchTab = SearchTab.TOP,
@@ -95,6 +98,7 @@ data class UiState(
     val relatedQueries: List<String> = emptyList(),
     val isSearching: Boolean = false,
     val searchError: String? = null,
+
     // Settings & Cache
     val settings: AppSettings = AppSettings(),
     val cacheSizeText: String = "0 MB",
@@ -272,6 +276,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         if (state.isLoadingMore || !state.hasMore) return
         val expectedCategoryId = state.activeCategory.id
+
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingMore = true) }
             val result = repo.getCategoryFeed(
@@ -448,6 +453,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 profileError = null
             )
         }
+        repo.seedAuthorHint(author)
         loadProfileData(author.username, forceRefresh = false)
     }
 
@@ -511,8 +517,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun retryProfile() {
-        val username = _uiState.value.profileAuthor?.username ?: return
-        loadProfileData(username, forceRefresh = true)
+        val author = _uiState.value.profileAuthor ?: return
+        repo.seedAuthorHint(author)
+        loadProfileData(author.username, forceRefresh = true)
     }
 
     fun loadMoreProfileVideos() {
@@ -645,6 +652,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(isProfileLoading = true, isProfileLoadingMore = false, profileError = null) }
             var result = repo.getUserProfile(username, forceRefresh = forceRefresh)
             val cleanTarget = username.trim().removePrefix("@")
+
             if (!forceRefresh && result.getOrNull()?.videos.isNullOrEmpty()) {
                 val retryResult = repo.getUserProfile(username, forceRefresh = true)
                 if (retryResult.isSuccess && !retryResult.getOrNull()?.videos.isNullOrEmpty()) {
@@ -672,6 +680,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 val mergedVideos = (res.videos + knownLocalVideos).distinctBy { it.id }
                 prefs.recordAuthorVideos(resolvedHandle.ifBlank { cleanTarget }, mergedVideos)
+
                 val existingAuthor = _uiState.value.profileAuthor
                 val mergedAuthor = res.author.copy(
                     avatarUrl = res.author.avatarUrl.ifBlank { existingAuthor?.avatarUrl.orEmpty() },
@@ -706,6 +715,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         archivedVideos
                     ).filter { it.author.username.equals(cleanTarget, ignoreCase = true) }
                     .distinctBy { it.id }
+
                 val fallbackHydrated = hydrateLocalFlags(knownLocalVideos)
                 _uiState.update {
                     it.copy(
