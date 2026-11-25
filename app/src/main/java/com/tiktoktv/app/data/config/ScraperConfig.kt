@@ -46,9 +46,9 @@ object ScraperConfig {
     const val PROFILE_INITIAL_BATCH_SIZE = 30
     const val PROFILE_WEB_PAGE_SIZE = 35
     const val HYDRATION_CONCURRENCY = 5
-    const val WEB_SESSION_TIMEOUT_MS = 15_000L
+    const val WEB_SESSION_TIMEOUT_MS = 22_000L
     const val WEBMSSDK_FALLBACK_URL =
-        "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/webmssdk/1.0.0.95/webmssdk.js"
+        "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/webmssdk/1.0.0.422/webmssdk.js"
 
     // Region pool rotated on every launch/refresh for fresh content
     val TRENDING_REGION_POOL: List<String> = listOf(
