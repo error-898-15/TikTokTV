@@ -51,7 +51,6 @@ class TikTokWebSessionClient(
     private val context: Context,
     private val onCookiesSynced: (String) -> Unit
 ) {
-
     private val appContext = context.applicationContext
     private val sessionMutex = Mutex()
     private val pendingResults = ConcurrentHashMap<String, CompletableDeferred<String>>()
@@ -95,6 +94,7 @@ class TikTokWebSessionClient(
         } else {
             ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE
         }
+
         webView?.let { existing ->
             if (existing.settings.userAgentString != targetUa) {
                 existing.settings.userAgentString = targetUa
@@ -181,14 +181,17 @@ class TikTokWebSessionClient(
                 ): WebResourceResponse? {
                     val uri = request?.url ?: return null
                     val urlStr = uri.toString()
+
                     if (urlStr.contains("/api/post/item_list/") || urlStr.contains("/api/creator/item_list/")) {
                         capturePostQueryTemplate(uri)
                         return null
                     }
+
                     val pathLower = uri.path?.lowercase().orEmpty()
                     if (BLOCKED_EXTENSIONS.any { pathLower.endsWith(it) }) {
                         return emptyResponse()
                     }
+
                     val hostLower = uri.host?.lowercase().orEmpty()
                     if ((hostLower.startsWith("mon") && hostLower.contains("tiktokv")) ||
                         pathLower.contains("monitor_browser")
@@ -198,6 +201,7 @@ class TikTokWebSessionClient(
                     return null
                 }
             }
+
             webView = view
             view
         }.getOrNull()
@@ -238,12 +242,14 @@ class TikTokWebSessionClient(
     ): WebSessionPageResponse? = sessionMutex.withLock {
         val cleanUser = username.trim().removePrefix("@")
         if (cleanUser.isBlank()) return@withLock null
+
         val isInitialPage = cursor == "0"
         val preferDesktop = if (!isInitialPage && currentUsername.equals(cleanUser, ignoreCase = true)) {
             currentUseDesktopUa
         } else {
             false
         }
+
         val firstAttempt = executeFetchUserPostsLocked(
             cleanUser = cleanUser,
             secUidHint = secUidHint,
@@ -253,6 +259,7 @@ class TikTokWebSessionClient(
             forceReload = forceReload,
             useDesktopUa = preferDesktop
         )
+
         if (isInitialPage && !preferDesktop && !hasNonEmptyItemList(firstAttempt?.rawApiJson)) {
             val desktopAttempt = executeFetchUserPostsLocked(
                 cleanUser = cleanUser,
@@ -271,6 +278,7 @@ class TikTokWebSessionClient(
             if (firstAttempt != null) return@withLock firstAttempt
             return@withLock desktopAttempt
         }
+
         return@withLock firstAttempt
     }
 
@@ -282,8 +290,8 @@ class TikTokWebSessionClient(
     ): WebSearchSessionResponse? = sessionMutex.withLock {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return@withLock null
-        val view = ensureWebViewOnMain(useDesktopUa = true) ?: return@withLock null
 
+        val view = ensureWebViewOnMain(useDesktopUa = true) ?: return@withLock null
         val isNewSearch = !currentSearchQuery.equals(cleanQuery, ignoreCase = true) || offset == 0 || !currentUseDesktopUa
         if (isNewSearch) {
             currentUsername = ""
@@ -329,6 +337,7 @@ class TikTokWebSessionClient(
         val userJson = parsed.optString("userJson", "")
         val liveJson = parsed.optString("liveJson", "")
         val domRefs = parseDomRefs(parsed.optJSONArray("domRefs"))
+
         if (generalJson.isBlank() && itemJson.isBlank() && userJson.isBlank() && liveJson.isBlank() && domRefs.isEmpty()) {
             return@withLock null
         }
@@ -404,10 +413,12 @@ class TikTokWebSessionClient(
         if (combinedDomRefs.isNotEmpty()) {
             currentDomRefs = combinedDomRefs
         }
+
         val validJsonBody = if (body.isNotBlank() && body.trimStart().startsWith("{")) body else ""
         if (validJsonBody.isBlank() && combinedDomRefs.isEmpty() && currentUserDetailJson.isBlank()) {
             return null
         }
+
         return WebSessionPageResponse(
             rawApiJson = validJsonBody,
             secUid = effectiveSecUid,
@@ -466,12 +477,14 @@ class TikTokWebSessionClient(
 
         val deferred = CompletableDeferred<Boolean>()
         val targetUrl = ScraperConfig.TIKTOK_PROFILE_URL_TEMPLATE.format(Uri.encode(cleanUser))
+
         withContext(Dispatchers.Main) {
             pageLoadDeferred = null
             view.stopLoading()
             pageLoadDeferred = deferred
             view.loadUrl(targetUrl)
         }
+
         withTimeoutOrNull(14_000L) { deferred.await() }
         pageLoadDeferred = null
 
@@ -490,6 +503,7 @@ class TikTokWebSessionClient(
             )
         }
         syncCookiesFromManager()
+
         if (!readyJson.isNullOrBlank()) {
             runCatching {
                 val obj = JSONObject(readyJson)
@@ -773,9 +787,11 @@ class TikTokWebSessionClient(
           } catch (e) {}
           return out;
         };
+
         let sdkInjected = false;
         let result = { secUid: '', userId: '', userDetailJson: '', mssdkReady: false, domRefs: [] };
         let secUidFirstSeenAt = -1;
+
         for (let i = 0; i < 45; i++) {
           let ds = null;
           try {
@@ -800,6 +816,7 @@ class TikTokWebSessionClient(
           if (result.secUid && secUidFirstSeenAt < 0) {
             secUidFirstSeenAt = i;
           }
+
           const ac = window.byted_acrawler;
           const mssdkReady = Boolean(
             window.MSSDK_INITIALIZED ||
@@ -808,9 +825,11 @@ class TikTokWebSessionClient(
           result.mssdkReady = mssdkReady;
           const hasCapturedPage = Boolean(window.__TT_CAPTURED_FIRST_POST_PAGE);
           const waitedEnoughAfterSecUid = secUidFirstSeenAt >= 0 && (i - secUidFirstSeenAt) >= 16;
+
           if (result.secUid && (hasCapturedPage || (mssdkReady && waitedEnoughAfterSecUid))) {
             break;
           }
+
           if (i === 14 && !mssdkReady && !sdkInjected) {
             sdkInjected = true;
             try {
@@ -997,6 +1016,7 @@ class TikTokWebSessionClient(
           if (appCtx.odinId) defaults.odinId = String(appCtx.odinId);
           if (verifyMatch && verifyMatch[1]) defaults.verifyFp = verifyMatch[1];
           if (msTokenMatch && msTokenMatch[1]) defaults.msToken = decodeURIComponent(msTokenMatch[1]);
+
           for (const [k, v] of Object.entries(defaults)) {
             if (v !== undefined && v !== null) params.set(k, String(v));
           }
@@ -1018,6 +1038,7 @@ class TikTokWebSessionClient(
               });
             }
           } catch (e) {}
+
           if (platformOverride) params.set('device_platform', platformOverride);
           params.delete('X-Bogus');
           params.delete('X-Gnarly');
@@ -1071,6 +1092,7 @@ class TikTokWebSessionClient(
             return { status: 0, body: '' };
           }
         };
+
         const tryXhr = (qs) => new Promise((resolve) => {
           try {
             const xhr = new XMLHttpRequest();
@@ -1087,6 +1109,7 @@ class TikTokWebSessionClient(
             resolve({ status: 0, body: '' });
           }
         });
+
         const signWithFrontier = async (qs) => {
           const ac = window.byted_acrawler;
           if (!ac) return null;
@@ -1130,6 +1153,7 @@ class TikTokWebSessionClient(
           const qs = buildParams(platformOverride).toString();
           let r = await tryFetch(qs);
           if (hasItemsInJson(r.body)) return r;
+
           const signedQs = await signWithFrontier(qs);
           if (signedQs) {
             const rSignedFetch = await tryFetch(signedQs);
@@ -1143,6 +1167,7 @@ class TikTokWebSessionClient(
               }
             }
           }
+
           if (!isValidPostJson(r.body)) {
             await sleep(300);
             const rXhr = await tryXhr(qs);
@@ -1161,6 +1186,7 @@ class TikTokWebSessionClient(
             res = altRes;
           }
         }
+
         return { status: res.status, body: res.body || '', domRefs: collectDomRefs() };
     """.trimIndent()
 

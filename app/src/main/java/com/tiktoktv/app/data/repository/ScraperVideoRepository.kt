@@ -673,7 +673,7 @@ class ScraperVideoRepository(
                 var chSearchHasMore = state.chSearchHasMore
 
                 var attempts = 0
-                while (candidateMap.size < 12 && attempts < 3) {
+                while (candidateMap.size < 18 && attempts < 4) {
                     if (qIdx >= queue.size) {
                         if (chSearchHasMore && chSearchCursor.isNotBlank()) {
                             val extraChallenges = fetchChallengeSearchApi(
@@ -776,7 +776,7 @@ class ScraperVideoRepository(
 
             val queue = challengeMatches.challenges
                 .filter { it.userCount > 0 }
-                .take(12)
+                .take(18)
                 .map { ch ->
                     ChallengeQueueEntry(
                         id = ch.id,
@@ -800,6 +800,22 @@ class ScraperVideoRepository(
                 val nextC = posts.nextCursor.orEmpty()
                 val more = posts.hasMore && nextC.isNotBlank() && nextC != "0"
                 queue[i] = entry.copy(
+                    cursor = if (more) nextC else "18",
+                    hasMore = more
+                )
+            }
+            if (candidateMap.size < 24 && queue.size > initialChallengeCount) {
+                val extraIdx = initialChallengeCount
+                val entry = queue[extraIdx]
+                val posts = fetchChallengePostsApi(
+                    challengeId = entry.id,
+                    cursor = "0",
+                    count = ScraperConfig.DEFAULT_PAGE_SIZE
+                )
+                posts.videos.forEach { candidateMap.putIfAbsent(it.id, it) }
+                val nextC = posts.nextCursor.orEmpty()
+                val more = posts.hasMore && nextC.isNotBlank() && nextC != "0"
+                queue[extraIdx] = entry.copy(
                     cursor = if (more) nextC else "18",
                     hasMore = more
                 )
@@ -2595,7 +2611,12 @@ class ScraperVideoRepository(
         val nextCursor = if (data is JSONObject) {
             data.optCleanString("cursor").takeIf { it.isNotBlank() && it != "0" }
         } else null
-        val hasMore = if (data is JSONObject) data.optBoolean("hasMore", videos.isNotEmpty()) else videos.isNotEmpty()
+        val hasMore = when {
+            data !is JSONObject -> videos.isNotEmpty()
+            data.has("hasMore") -> data.optBoolean("hasMore", videos.isNotEmpty())
+            data.has("has_more") -> data.optBoolean("has_more", videos.isNotEmpty())
+            else -> videos.isNotEmpty()
+        }
         return FeedPage(videos = videos, nextCursor = nextCursor, hasMore = hasMore)
     }
 

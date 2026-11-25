@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.tiktoktv.app.data.config.ScraperConfig
 import com.tiktoktv.app.ui.AppScreen
 import com.tiktoktv.app.ui.FeedOverlayMode
+import com.tiktoktv.app.ui.FeedSourceMode
 import com.tiktoktv.app.ui.MainViewModel
 import com.tiktoktv.app.ui.screens.CategoryScreen
 import com.tiktoktv.app.ui.screens.HomeFeedScreen
@@ -37,7 +38,6 @@ import com.tiktoktv.app.ui.theme.TikTokColors
 import com.tiktoktv.app.ui.theme.TikTokTvTheme
 
 class MainActivity : ComponentActivity() {
-
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,7 +69,6 @@ class MainActivity : ComponentActivity() {
                 Box(modifier = Modifier.fillMaxSize().background(TikTokColors.Black)) {
                     when (uiState.currentScreen) {
                         AppScreen.SPLASH -> SplashScreen(onFinished = { viewModel.finishSplash() })
-
                         AppScreen.HOME_FEED -> HomeFeedScreen(
                             uiState = uiState,
                             playerManager = viewModel.playerManager,
@@ -93,7 +92,6 @@ class MainActivity : ComponentActivity() {
                             onOpenSettings = { viewModel.openSettingsScreen() },
                             onRetryFeed = { viewModel.retryFeed() }
                         )
-
                         AppScreen.CATEGORY_PICKER -> CategoryScreen(
                             categories = uiState.categories,
                             activeCategory = uiState.activeCategory,
@@ -101,11 +99,10 @@ class MainActivity : ComponentActivity() {
                             onSelectCategory = { cat -> viewModel.selectCategory(cat) },
                             onDismiss = { viewModel.closeCategoryScreenWithoutChange() }
                         )
-
                         AppScreen.PROFILE -> ProfileScreen(
                             uiState = uiState,
                             onSelectTab = { tab -> viewModel.selectProfileTab(tab) },
-                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
+                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx, FeedSourceMode.PROFILE) },
                             onRetryProfile = { viewModel.retryProfile() },
                             onLoadMoreProfile = { viewModel.loadMoreProfileVideos() },
                             onToggleAutoScroll = { viewModel.toggleAutoScroll() },
@@ -114,20 +111,18 @@ class MainActivity : ComponentActivity() {
                             onClearCache = { viewModel.clearAllCache() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )
-
                         AppScreen.SEARCH -> SearchScreen(
                             uiState = uiState,
                             onQueryChange = { q -> viewModel.updateSearchQuery(q) },
                             onSubmitSearch = { q -> viewModel.submitSearch(q) },
                             onSelectTab = { tab -> viewModel.selectSearchTab(tab) },
                             onOpenUserProfile = { author -> viewModel.openAuthorProfile(author) },
-                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx) },
+                            onPlayVideo = { list, idx -> viewModel.playVideoFromGrid(list, idx, FeedSourceMode.SEARCH) },
                             onLoadMoreResults = { viewModel.loadMoreSearchResults() },
                             onLoadMoreUsers = { viewModel.loadMoreSearchUsers() },
                             onLoadMoreHashtags = { viewModel.loadMoreSearchHashtags() },
                             onBack = { viewModel.navigateBackToFeed() }
                         )
-
                         AppScreen.SETTINGS -> SettingsScreen(
                             settings = uiState.settings,
                             cacheSizeText = uiState.cacheSizeText,

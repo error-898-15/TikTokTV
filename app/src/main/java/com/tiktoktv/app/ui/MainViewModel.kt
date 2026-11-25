@@ -54,6 +54,13 @@ enum class ProfileTab {
     SETTINGS
 }
 
+enum class FeedSourceMode {
+    CATEGORY,
+    SEARCH,
+    PROFILE,
+    LOCAL
+}
+
 data class UiState(
     val currentScreen: AppScreen = AppScreen.SPLASH,
     val overlayMode: FeedOverlayMode = FeedOverlayMode.NONE,
@@ -127,6 +134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val playerManager = app.playerManager
     private val prefetcher = app.videoPrefetcher
 
+    private var feedSourceMode: FeedSourceMode = FeedSourceMode.CATEGORY
     private var suggestionJob: Job? = null
     private var searchJob: Job? = null
     private var feedLoadJob: Job? = null
@@ -203,6 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadCategoryFeed(category: Category, forceRefresh: Boolean = false) {
+        feedSourceMode = FeedSourceMode.CATEGORY
         feedLoadJob?.cancel()
         feedLoadJob = viewModelScope.launch {
             _uiState.update {
@@ -285,46 +294,168 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadMoreFeed(advanceAfterLoad: Boolean = false) {
         val state = _uiState.value
         if (state.isLoadingMore || !state.hasMore) return
-        val expectedCategoryId = state.activeCategory.id
 
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingMore = true) }
-            val result = repo.getCategoryFeed(
-                category = state.activeCategory,
-                cursor = state.nextCursor,
-                forceRefresh = false,
-                excludeIds = prefs.getSeenVideoIds()
-            )
-            if (_uiState.value.activeCategory.id != expectedCategoryId) return@launch
+        when (feedSourceMode) {
+            FeedSourceMode.LOCAL -> return
+            FeedSourceMode.SEARCH -> {
+                val query = state.searchQuery.trim()
+                val startCursor = state.nextCursor ?: state.searchNextCursor
+                if (query.isBlank() || startCursor.isNullOrBlank()) return
+                viewModelScope.launch {
+                    _uiState.update { it.copy(isLoadingMore = true) }
+                    val existingIds = _uiState.value.feedVideos.map { it.id }.toHashSet()
+                    val collected = mutableListOf<VideoItem>()
+                    var cursorNow: String? = startCursor
+                    var hasNextNow = true
+                    var attempts = 0
+                    var failed = false
 
-            result.onSuccess { page ->
-                val existingIds = _uiState.value.feedVideos.map { it.id }.toSet()
-                val newOnes = hydrateLocalFlags(page.videos).filterNot { existingIds.contains(it.id) }
-                newOnes.groupBy { it.author.username }.forEach { (uname, list) ->
-                    prefs.recordAuthorVideos(uname, list)
-                }
-                _uiState.update { current ->
-                    val combined = current.feedVideos + newOnes
-                    val targetIdx = if (advanceAfterLoad && newOnes.isNotEmpty()) {
-                        (current.currentIndex + 1).coerceAtMost(combined.lastIndex)
-                    } else {
-                        current.currentIndex
+                    while (attempts < 3 && collected.size < 6 && hasNextNow && !cursorNow.isNullOrBlank()) {
+                        attempts++
+                        val res = repo.searchUnified(query, cursor = cursorNow)
+                        if (feedSourceMode != FeedSourceMode.SEARCH || _uiState.value.searchQuery.trim() != query) {
+                            _uiState.update { it.copy(isLoadingMore = false) }
+                            return@launch
+                        }
+                        res.onSuccess { page ->
+                            val fresh = hydrateLocalFlags(page.videos).filter {
+                                existingIds.add(it.id)
+                            }
+                            collected.addAll(fresh)
+                            val nextC = page.nextCursor
+                            hasNextNow = page.hasMore && !nextC.isNullOrBlank() && nextC != cursorNow
+                            cursorNow = if (hasNextNow) nextC else null
+                        }.onFailure {
+                            failed = true
+                            hasNextNow = false
+                        }
+                        if (failed) break
                     }
-                    current.copy(
-                        feedVideos = combined,
-                        currentIndex = targetIdx,
-                        nextCursor = page.nextCursor,
-                        hasMore = page.hasMore && (newOnes.isNotEmpty() || page.nextCursor != null),
-                        isLoadingMore = false
+
+                    collected.groupBy { it.author.username }.forEach { (uname, list) ->
+                        prefs.recordAuthorVideos(uname, list)
+                    }
+
+                    _uiState.update { current ->
+                        val combinedFeed = (current.feedVideos + collected).distinctBy { it.id }
+                        val combinedSearch = (current.searchResults + collected).distinctBy { it.id }
+                        val targetIdx = if (advanceAfterLoad && collected.isNotEmpty()) {
+                            (current.currentIndex + 1).coerceAtMost(combinedFeed.lastIndex)
+                        } else {
+                            current.currentIndex
+                        }
+                        current.copy(
+                            feedVideos = combinedFeed,
+                            searchResults = combinedSearch,
+                            currentIndex = targetIdx,
+                            nextCursor = cursorNow,
+                            hasMore = hasNextNow,
+                            searchNextCursor = cursorNow,
+                            searchHasMore = hasNextNow,
+                            isLoadingMore = false
+                        )
+                    }
+                    if (advanceAfterLoad && collected.isNotEmpty()) {
+                        playAndPrefetch(_uiState.value.currentIndex)
+                    } else {
+                        prefetchNextTwo(_uiState.value.currentIndex)
+                    }
+                }
+                return
+            }
+            FeedSourceMode.PROFILE -> {
+                val username = state.profileAuthor?.username ?: return
+                val cursor = state.nextCursor ?: state.profileNextCursor ?: return
+                viewModelScope.launch {
+                    _uiState.update { it.copy(isLoadingMore = true) }
+                    val res = repo.getUserProfile(username, cursor = cursor, forceRefresh = false)
+                    if (feedSourceMode != FeedSourceMode.PROFILE) {
+                        _uiState.update { it.copy(isLoadingMore = false) }
+                        return@launch
+                    }
+                    res.onSuccess { page ->
+                        val existingIds = _uiState.value.feedVideos.map { it.id }.toHashSet()
+                        val newOnes = hydrateLocalFlags(page.videos).filter { existingIds.add(it.id) }
+                        newOnes.groupBy { it.author.username }.forEach { (uname, list) ->
+                            prefs.recordAuthorVideos(uname, list)
+                        }
+                        val nextC = page.nextCursor
+                        val hasNext = page.hasMore && !nextC.isNullOrBlank() && nextC != cursor
+                        _uiState.update { current ->
+                            val combinedFeed = (current.feedVideos + newOnes).distinctBy { it.id }
+                            val combinedProfile = (current.profileVideos + newOnes).distinctBy { it.id }
+                            val targetIdx = if (advanceAfterLoad && newOnes.isNotEmpty()) {
+                                (current.currentIndex + 1).coerceAtMost(combinedFeed.lastIndex)
+                            } else {
+                                current.currentIndex
+                            }
+                            current.copy(
+                                feedVideos = combinedFeed,
+                                profileVideos = combinedProfile,
+                                currentIndex = targetIdx,
+                                nextCursor = if (hasNext) nextC else null,
+                                hasMore = hasNext,
+                                profileNextCursor = if (hasNext) nextC else null,
+                                profileHasMore = hasNext,
+                                isLoadingMore = false
+                            )
+                        }
+                        if (advanceAfterLoad && newOnes.isNotEmpty()) {
+                            playAndPrefetch(_uiState.value.currentIndex)
+                        } else {
+                            prefetchNextTwo(_uiState.value.currentIndex)
+                        }
+                    }.onFailure {
+                        _uiState.update { it.copy(isLoadingMore = false) }
+                    }
+                }
+                return
+            }
+            FeedSourceMode.CATEGORY -> {
+                val expectedCategoryId = state.activeCategory.id
+                viewModelScope.launch {
+                    _uiState.update { it.copy(isLoadingMore = true) }
+                    val result = repo.getCategoryFeed(
+                        category = state.activeCategory,
+                        cursor = state.nextCursor,
+                        forceRefresh = false,
+                        excludeIds = prefs.getSeenVideoIds()
                     )
+                    if (feedSourceMode != FeedSourceMode.CATEGORY || _uiState.value.activeCategory.id != expectedCategoryId) {
+                        _uiState.update { it.copy(isLoadingMore = false) }
+                        return@launch
+                    }
+
+                    result.onSuccess { page ->
+                        val existingIds = _uiState.value.feedVideos.map { it.id }.toSet()
+                        val newOnes = hydrateLocalFlags(page.videos).filterNot { existingIds.contains(it.id) }
+                        newOnes.groupBy { it.author.username }.forEach { (uname, list) ->
+                            prefs.recordAuthorVideos(uname, list)
+                        }
+                        _uiState.update { current ->
+                            val combined = current.feedVideos + newOnes
+                            val targetIdx = if (advanceAfterLoad && newOnes.isNotEmpty()) {
+                                (current.currentIndex + 1).coerceAtMost(combined.lastIndex)
+                            } else {
+                                current.currentIndex
+                            }
+                            current.copy(
+                                feedVideos = combined,
+                                currentIndex = targetIdx,
+                                nextCursor = page.nextCursor,
+                                hasMore = page.hasMore && (newOnes.isNotEmpty() || page.nextCursor != null),
+                                isLoadingMore = false
+                            )
+                        }
+                        if (advanceAfterLoad && newOnes.isNotEmpty()) {
+                            playAndPrefetch(_uiState.value.currentIndex)
+                        } else {
+                            prefetchNextTwo(_uiState.value.currentIndex)
+                        }
+                    }.onFailure {
+                        _uiState.update { it.copy(isLoadingMore = false) }
+                    }
                 }
-                if (advanceAfterLoad && newOnes.isNotEmpty()) {
-                    playAndPrefetch(_uiState.value.currentIndex)
-                } else {
-                    prefetchNextTwo(_uiState.value.currentIndex)
-                }
-            }.onFailure {
-                _uiState.update { it.copy(isLoadingMore = false) }
             }
         }
     }
@@ -740,17 +871,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun playVideoFromGrid(videos: List<VideoItem>, selectedIndex: Int) {
+    fun playVideoFromGrid(
+        videos: List<VideoItem>,
+        selectedIndex: Int,
+        source: FeedSourceMode = FeedSourceMode.LOCAL
+    ) {
         if (videos.isEmpty()) return
         val safeIdx = selectedIndex.coerceIn(0, videos.lastIndex)
-        _uiState.update {
-            it.copy(
+        feedSourceMode = source
+        _uiState.update { state ->
+            val (cursorForPlayer, hasMoreForPlayer) = when (source) {
+                FeedSourceMode.SEARCH -> state.searchNextCursor to (state.searchHasMore && !state.searchNextCursor.isNullOrBlank())
+                FeedSourceMode.PROFILE -> if (!state.isOwnProfile) {
+                    state.profileNextCursor to (state.profileHasMore && !state.profileNextCursor.isNullOrBlank())
+                } else null to false
+                else -> null to false
+            }
+            state.copy(
                 currentScreen = AppScreen.HOME_FEED,
                 overlayMode = FeedOverlayMode.NONE,
                 feedVideos = hydrateLocalFlags(videos),
                 currentIndex = safeIdx,
                 feedError = null,
-                hasMore = false
+                nextCursor = cursorForPlayer,
+                hasMore = hasMoreForPlayer,
+                isLoadingMore = false
             )
         }
         playAndPrefetch(safeIdx)
@@ -852,31 +997,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadMoreSearchResults() {
         val state = _uiState.value
         val query = state.searchQuery.trim()
-        val cursor = state.searchNextCursor
-        if (query.isBlank() || cursor.isNullOrBlank() || !state.searchHasMore || state.isSearchLoadingMore || state.isSearching) {
+        val startCursor = state.searchNextCursor
+        if (query.isBlank() || startCursor.isNullOrBlank() || !state.searchHasMore || state.isSearchLoadingMore || state.isSearching) {
             return
         }
         viewModelScope.launch {
             _uiState.update { it.copy(isSearchLoadingMore = true) }
-            val result = repo.searchUnified(query, cursor = cursor)
-            if (_uiState.value.searchQuery.trim() != query) return@launch
-            result.onSuccess { page ->
-                val existingIds = _uiState.value.searchResults.map { it.id }.toHashSet()
-                val incoming = hydrateLocalFlags(page.videos).filterNot { existingIds.contains(it.id) }
-                incoming.groupBy { it.author.username }.forEach { (uname, vids) ->
-                    prefs.recordAuthorVideos(uname, vids)
+            val existingIds = _uiState.value.searchResults.map { it.id }.toHashSet()
+            val aggregated = mutableListOf<VideoItem>()
+            var cursorNow: String? = startCursor
+            var hasNextNow = true
+            var attempts = 0
+            var failed = false
+
+            while (attempts < 3 && aggregated.size < 6 && hasNextNow && !cursorNow.isNullOrBlank()) {
+                attempts++
+                val result = repo.searchUnified(query, cursor = cursorNow)
+                if (_uiState.value.searchQuery.trim() != query) {
+                    _uiState.update { it.copy(isSearchLoadingMore = false) }
+                    return@launch
                 }
-                val hasNext = page.hasMore && !page.nextCursor.isNullOrBlank()
-                _uiState.update { current ->
-                    current.copy(
-                        searchResults = current.searchResults + incoming,
-                        searchNextCursor = if (hasNext) page.nextCursor else null,
-                        searchHasMore = hasNext,
-                        isSearchLoadingMore = false
-                    )
+                result.onSuccess { page ->
+                    val fresh = hydrateLocalFlags(page.videos).filter { existingIds.add(it.id) }
+                    aggregated.addAll(fresh)
+                    val nextC = page.nextCursor
+                    hasNextNow = page.hasMore && !nextC.isNullOrBlank() && nextC != cursorNow
+                    cursorNow = if (hasNextNow) nextC else null
+                }.onFailure {
+                    failed = true
+                    hasNextNow = false
                 }
-            }.onFailure {
-                _uiState.update { it.copy(isSearchLoadingMore = false) }
+                if (failed) break
+            }
+
+            aggregated.groupBy { it.author.username }.forEach { (uname, vids) ->
+                prefs.recordAuthorVideos(uname, vids)
+            }
+            _uiState.update { current ->
+                current.copy(
+                    searchResults = (current.searchResults + aggregated).distinctBy { it.id },
+                    searchNextCursor = cursorNow,
+                    searchHasMore = hasNextNow,
+                    isSearchLoadingMore = false
+                )
             }
         }
     }

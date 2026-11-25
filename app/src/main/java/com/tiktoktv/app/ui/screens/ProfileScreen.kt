@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -461,13 +462,14 @@ fun VideoFiveColumnGrid(
         return
     }
     val gridState = rememberLazyGridState()
+    val uniqueVideos = remember(videos) { videos.distinctBy { it.id } }
     if (onLoadMore != null && hasMore) {
-        LaunchedEffect(gridState, videos.size, hasMore, isLoadingMore) {
+        LaunchedEffect(gridState, uniqueVideos.size, hasMore, isLoadingMore) {
             snapshotFlow {
                 val layoutInfo = gridState.layoutInfo
                 val total = layoutInfo.totalItemsCount
                 val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                total > 0 && lastVisible >= total - 5
+                total > 0 && (lastVisible >= (total - 10).coerceAtLeast(0) || !gridState.canScrollForward)
             }
                 .distinctUntilChanged()
                 .filter { it && hasMore && !isLoadingMore }
@@ -477,7 +479,6 @@ fun VideoFiveColumnGrid(
         }
     }
 
-    val uniqueVideos = remember(videos) { videos.distinctBy { it.id } }
     LazyVerticalGrid(
         state = gridState,
         columns = GridCells.Fixed(5),
@@ -486,8 +487,41 @@ fun VideoFiveColumnGrid(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        itemsIndexed(uniqueVideos, key = { _, item -> item.id }) { index, video ->
+        itemsIndexed(uniqueVideos, key = { _, item -> item.id }) { _, video ->
             VideoGridThumbnailCard(video = video, onClick = { onVideoClick(videos.indexOfFirst { it.id == video.id }.coerceAtLeast(0)) })
+        }
+        if (isLoadingMore || (hasMore && onLoadMore != null)) {
+            item(span = { GridItemSpan(5) }, key = "__video_grid_footer__") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoadingMore) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = TikTokColors.Pink,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Text(
+                                text = "Loading more videos...",
+                                color = TikTokColors.TextSecondary,
+                                fontSize = 14.sp
+                            )
+                        }
+                    } else if (onLoadMore != null) {
+                        FocusPillButton(
+                            label = "Load More Videos",
+                            onClick = onLoadMore
+                        )
+                    }
+                }
+            }
         }
     }
 }

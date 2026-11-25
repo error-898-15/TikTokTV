@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -100,7 +101,6 @@ fun SearchScreen(
     onBack: () -> Unit
 ) {
     val searchFieldFocus = remember { FocusRequester() }
-
     LaunchedEffect(Unit) {
         runCatching { searchFieldFocus.requestFocus() }
     }
@@ -134,7 +134,7 @@ fun SearchScreen(
                     .clickable { onBack() }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown &&
-                            (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                            (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
                         ) {
                             onBack()
                             true
@@ -338,7 +338,7 @@ fun SearchScreen(
                                             val layoutInfo = usersGridState.layoutInfo
                                             val total = layoutInfo.totalItemsCount
                                             val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                                            total > 0 && lastVisible >= total - 3
+                                            total > 0 && (lastVisible >= (total - 6).coerceAtLeast(0) || !usersGridState.canScrollForward)
                                         }
                                             .distinctUntilChanged()
                                             .filter { it && uiState.searchUsersHasMore && !uiState.isSearchUsersLoadingMore }
@@ -358,6 +358,20 @@ fun SearchScreen(
                                             onClick = { onOpenUserProfile(user) },
                                             modifier = Modifier.fillMaxWidth()
                                         )
+                                    }
+                                    if (uiState.isSearchUsersLoadingMore) {
+                                        item(span = { GridItemSpan(3) }, key = "__users_loading__") {
+                                            Box(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    color = TikTokColors.Pink,
+                                                    strokeWidth = 2.5.dp,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -402,7 +416,7 @@ fun SearchScreen(
                                             val layoutInfo = tagsGridState.layoutInfo
                                             val total = layoutInfo.totalItemsCount
                                             val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                                            total > 0 && lastVisible >= total - 4
+                                            total > 0 && (lastVisible >= (total - 8).coerceAtLeast(0) || !tagsGridState.canScrollForward)
                                         }
                                             .distinctUntilChanged()
                                             .filter { it && uiState.searchHashtagsHasMore && !uiState.isSearchHashtagsLoadingMore }
@@ -422,6 +436,20 @@ fun SearchScreen(
                                             onClick = { onSubmitSearch(tag.tag) }
                                         )
                                     }
+                                    if (uiState.isSearchHashtagsLoadingMore) {
+                                        item(span = { GridItemSpan(4) }, key = "__hashtags_loading__") {
+                                            Box(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    color = TikTokColors.Pink,
+                                                    strokeWidth = 2.5.dp,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -440,15 +468,15 @@ private fun SuggestionChipCard(
     var isFocused by remember { mutableStateOf(false) }
     val icon = when (suggestion.type) {
         SuggestionType.HISTORY -> Icons.Filled.History
-        SuggestionType.TRENDING -> Icons.Filled.TrendingUp
         SuggestionType.CREATOR -> Icons.Filled.Person
         SuggestionType.HASHTAG -> Icons.Filled.Tag
+        SuggestionType.TRENDING -> Icons.Filled.TrendingUp
         SuggestionType.KEYWORD -> Icons.Filled.Search
     }
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(if (isFocused) TikTokColors.White else TikTokColors.SurfaceElevated)
+            .background(if (isFocused) TikTokColors.White else TikTokColors.SurfaceDark)
             .border(
                 width = 1.dp,
                 color = if (isFocused) TikTokColors.Pink else TikTokColors.Divider,
