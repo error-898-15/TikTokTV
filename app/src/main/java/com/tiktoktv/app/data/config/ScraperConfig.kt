@@ -7,6 +7,7 @@ import com.tiktoktv.app.data.model.Category
  * Update URLs, headers, JSON keys, and Jsoup selectors here if upstream structures change.
  */
 object ScraperConfig {
+
     // Base URLs
     const val TIKTOK_WEB_BASE = "https://www.tiktok.com"
     const val TIKTOK_EXPLORE_URL = "$TIKTOK_WEB_BASE/explore"
@@ -43,7 +44,11 @@ object ScraperConfig {
     const val DEFAULT_PAGE_SIZE = 18
     const val CATEGORY_PAGE_SIZE = 15
     const val PROFILE_INITIAL_BATCH_SIZE = 30
+    const val PROFILE_WEB_PAGE_SIZE = 35
     const val HYDRATION_CONCURRENCY = 5
+    const val WEB_SESSION_TIMEOUT_MS = 15_000L
+    const val WEBMSSDK_FALLBACK_URL =
+        "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/webmssdk/1.0.0.95/webmssdk.js"
 
     // Region pool rotated on every launch/refresh for fresh content
     val TRENDING_REGION_POOL: List<String> = listOf(
