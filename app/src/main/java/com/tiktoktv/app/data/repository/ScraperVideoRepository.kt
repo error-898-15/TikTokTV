@@ -19,6 +19,7 @@ import com.tiktoktv.app.data.model.UserProfileResult
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.data.model.VideoStats
 import com.tiktoktv.app.data.remote.TikTokWebSessionClient
+import com.tiktoktv.app.data.remote.WebSessionPageResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1128,7 +1129,7 @@ class ScraperVideoRepository(
         var matchedSearchAuthor: Author? = null
         var postsPage = FeedPage(emptyList(), null, false)
         var tagOwnRefs: List<Pair<String, String>> = emptyList()
-        var webResp: TikTokWebSessionClient.WebProfileApiResponse? = null
+        var webResp: WebSessionPageResponse? = null
 
         if (needSlowFallback) {
             val gbMobileProfileDeferred = async {
