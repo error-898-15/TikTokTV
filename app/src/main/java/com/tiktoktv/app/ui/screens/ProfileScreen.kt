@@ -345,6 +345,23 @@ fun ProfileScreen(
                                         onClick = onRetryProfile
                                     )
                                 }
+                            } else if (uiState.profileVideos.isEmpty() && !uiState.isOwnProfile) {
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = "No public videos found for this creator yet.",
+                                        color = TikTokColors.TextSecondary,
+                                        fontSize = 16.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(18.dp))
+                                    FocusPillButton(
+                                        label = "Retry",
+                                        onClick = onRetryProfile
+                                    )
+                                }
                             } else {
                                 VideoFiveColumnGrid(
                                     videos = uiState.profileVideos,
