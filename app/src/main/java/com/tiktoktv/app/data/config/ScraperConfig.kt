@@ -46,8 +46,8 @@ object ScraperConfig {
     const val API_COMMENT_LIST = "$PUBLIC_API_BASE/comment/list"
 
     // Network & Cache Settings
-    const val CONNECT_TIMEOUT_SEC = 12L
-    const val READ_TIMEOUT_SEC = 18L
+    const val CONNECT_TIMEOUT_SEC = 10L
+    const val READ_TIMEOUT_SEC = 14L
     const val HTTP_DISK_CACHE_BYTES = 80L * 1024L * 1024L // 80 MB
     const val MEMORY_CACHE_TTL_MS = 3 * 60 * 1000L // 3 minutes (never blocks fresh launch)
     const val DISK_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
@@ -55,11 +55,11 @@ object ScraperConfig {
     const val DEFAULT_PAGE_SIZE = 20
     const val SEARCH_PAGE_SIZE = 24
     const val CATEGORY_PAGE_SIZE = 15
-    const val PROFILE_INITIAL_BATCH_SIZE = 30
+    const val PROFILE_INITIAL_BATCH_SIZE = 35
     const val PROFILE_CREATOR_PAGE_SIZE = 30
     const val PROFILE_WEB_PAGE_SIZE = 35
-    const val HYDRATION_CONCURRENCY = 5
-    const val WEB_SESSION_TIMEOUT_MS = 22_000L
+    const val HYDRATION_CONCURRENCY = 8
+    const val WEB_SESSION_TIMEOUT_MS = 16_000L
     const val WEBMSSDK_FALLBACK_URL =
         "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/webmssdk/1.0.0.422/webmssdk.js"
 

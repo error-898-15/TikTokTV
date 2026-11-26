@@ -23,6 +23,9 @@ import com.tiktoktv.app.data.model.VideoQuality
 import com.tiktoktv.app.util.formatBytes
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.Collections
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -143,7 +146,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var feedLoadJob: Job? = null
     private var profileLoadJob: Job? = null
     private var profileAutoLoadJob: Job? = null
+    private var streamRecoveryJob: Job? = null
+    private var firstFrameWatchdogJob: Job? = null
     private val profilePageMutex = Mutex()
+    private val thumbnailRefreshSemaphore = Semaphore(4)
+    private val refreshedStreamIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val refreshedThumbnailIds = Collections.synchronizedSet(mutableSetOf<String>())
 
     @Volatile
     private var profileSessionToken: Long = 0L
@@ -168,6 +176,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ) {
                 nextVideo()
             }
+        }
+        playerManager.onAllCandidatesFailedCallback = { _ ->
+            attemptStreamRecoveryForCurrentVideo()
         }
         loadCategoryFeed(ScraperConfig.DEFAULT_CATEGORIES.first(), forceRefresh = true)
         refreshCacheSize()
@@ -675,11 +686,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         profileAutoLoadJob = viewModelScope.launch {
             var zeroNewStreak = 0
+            var consecutiveErrors = 0
             var steps = 0
             try {
-                while (isActive && steps < 300 && sessionToken == profileSessionToken) {
+                while (isActive && steps < 500 && sessionToken == profileSessionToken) {
                     val state = _uiState.value
-                    if (state.currentScreen != AppScreen.PROFILE ||
+                    val watchingSameProfileFeed = state.currentScreen == AppScreen.HOME_FEED &&
+                        feedSourceMode == FeedSourceMode.PROFILE
+                    if ((state.currentScreen != AppScreen.PROFILE && !watchingSameProfileFeed) ||
                         state.isOwnProfile ||
                         !state.profileHasMore ||
                         state.profileNextCursor.isNullOrBlank()
@@ -693,12 +707,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     val step = loadMoreProfilePageInternal(activeUser)
                     steps++
-                    if (!step.advanced || !step.hasMore) {
+                    if (!step.advanced) {
+                        if (!step.hasMore) break
+                        consecutiveErrors++
+                        if (consecutiveErrors >= 3) {
+                            break
+                        }
+                        delay(450L * consecutiveErrors)
+                        continue
+                    }
+                    consecutiveErrors = 0
+                    if (!step.hasMore) {
                         break
                     }
                     if (step.newCount == 0) {
                         zeroNewStreak++
-                        if (zeroNewStreak >= 10) {
+                        if (zeroNewStreak >= 15) {
                             _uiState.update {
                                 it.copy(
                                     isProfileLoadingMore = false,
@@ -711,7 +735,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         zeroNewStreak = 0
                     }
-                    delay(120L)
+                    delay(30L)
                 }
             } finally {
                 if (sessionToken == profileSessionToken) {
@@ -789,10 +813,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             avatarUrl = curAuthor.avatarUrl.ifBlank { res.author.avatarUrl }
                         )
                     } else res.author
+                    val updatedProfileVideos = (current.profileVideos + newOnes).distinctBy { it.id }
+                    val updatedFeedVideos = if (feedSourceMode == FeedSourceMode.PROFILE &&
+                        current.currentScreen == AppScreen.HOME_FEED
+                    ) {
+                        (current.feedVideos + newOnes).distinctBy { it.id }
+                    } else current.feedVideos
                     current.copy(
                         isProfileLoadingMore = false,
                         profileAuthor = updatedAuthor,
-                        profileVideos = (current.profileVideos + newOnes).distinctBy { it.id },
+                        profileVideos = updatedProfileVideos,
+                        feedVideos = updatedFeedVideos,
+                        nextCursor = if (feedSourceMode == FeedSourceMode.PROFILE && current.currentScreen == AppScreen.HOME_FEED) {
+                            if (nextCursorValid) res.nextCursor else null
+                        } else current.nextCursor,
+                        hasMore = if (feedSourceMode == FeedSourceMode.PROFILE && current.currentScreen == AppScreen.HOME_FEED) {
+                            nextCursorValid
+                        } else current.hasMore,
                         profileNextCursor = if (nextCursorValid) res.nextCursor else null,
                         profileHasMore = nextCursorValid
                     )
@@ -803,17 +840,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hasMore = nextCursorValid
                 )
             }.onFailure { err ->
+                var keepMore = false
                 _uiState.update { current ->
+                    keepMore = current.profileVideos.isNotEmpty() && !current.profileNextCursor.isNullOrBlank()
                     current.copy(
                         isProfileLoadingMore = false,
-                        profileHasMore = false,
-                        profileNextCursor = null,
+                        profileHasMore = keepMore,
+                        profileNextCursor = if (keepMore) current.profileNextCursor else null,
                         profileError = if (current.profileVideos.isEmpty()) {
                             err.message ?: "Failed to load profile."
                         } else current.profileError
                     )
                 }
-                stepResult = ProfilePageStepResult(false, 0, false)
+                stepResult = ProfilePageStepResult(false, 0, keepMore)
             }
             stepResult
         }
@@ -831,8 +870,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val firstProf = result.getOrNull()
             val needsForcedRetry = !forceRefresh && (
                 firstProf == null ||
-                    firstProf.videos.isEmpty() ||
-                    (firstProf.author.videoCount > 0L && firstProf.videos.size < firstProf.author.videoCount && !firstProf.hasMore)
+                    firstProf.videos.isEmpty()
                 )
             if (needsForcedRetry) {
                 val retryResult = repo.getUserProfile(username, forceRefresh = true)
@@ -853,19 +891,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     prefs.getAuthorVideoHistory(cleanTarget) +
                         prefs.getAuthorVideoHistory(resolvedHandle)
                     )
-                val knownLocalVideos = (
+                val freshSessionVideos = (
                     _uiState.value.feedVideos +
-                        _uiState.value.searchResults +
-                        _uiState.value.likedVideos +
+                        _uiState.value.searchResults
+                    ).filter {
+                        it.author.username.equals(cleanTarget, ignoreCase = true) ||
+                            it.author.username.equals(resolvedHandle, ignoreCase = true)
+                    }
+                val archivedFreshVideos = (
+                    _uiState.value.likedVideos +
                         _uiState.value.savedVideos +
                         _uiState.value.watchHistory +
                         archivedVideos
                     ).filter {
+                        (it.author.username.equals(cleanTarget, ignoreCase = true) ||
+                            it.author.username.equals(resolvedHandle, ignoreCase = true)) &&
+                            !isCdnUrlExpired(it.coverUrl) &&
+                            !isCdnUrlExpired(it.videoUrl)
+                    }
+                val knownLocalVideos = (freshSessionVideos + archivedFreshVideos).distinctBy { it.id }
+
+                val mergedVideos = if (res.videos.isNotEmpty()) {
+                    (res.videos + knownLocalVideos).distinctBy { it.id }
+                } else {
+                    (knownLocalVideos + archivedVideos.filter {
                         it.author.username.equals(cleanTarget, ignoreCase = true) ||
                             it.author.username.equals(resolvedHandle, ignoreCase = true)
-                    }.distinctBy { it.id }
-
-                val mergedVideos = (res.videos + knownLocalVideos).distinctBy { it.id }
+                    }).distinctBy { it.id }
+                }
                 prefs.recordAuthorVideos(resolvedHandle.ifBlank { cleanTarget }, mergedVideos)
 
                 val existingAuthor = _uiState.value.profileAuthor
@@ -1255,17 +1308,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun playAndPrefetch(index: Int) {
+        firstFrameWatchdogJob?.cancel()
+        streamRecoveryJob?.cancel()
         val videos = _uiState.value.feedVideos
         val video = videos.getOrNull(index) ?: return
         prefs.markVideosSeen(listOf(video.id))
         prefs.recordWatchHistory(video)
         val quality = _uiState.value.settings.videoQuality
+        val autoplay = _uiState.value.settings.autoplay
         if (video.isPhotoPost) {
-            playerManager.playPhotoAudio(video.audioUrl, autoplay = _uiState.value.settings.autoplay)
+            playerManager.playPhotoAudio(video.audioUrl, autoplay = autoplay)
         } else {
-            playerManager.playVideo(video.resolveCandidateUrls(quality), autoplay = _uiState.value.settings.autoplay)
+            val urls = video.resolveCandidateUrls(quality)
+            val allExpired = urls.isNotEmpty() && urls.all { isCdnUrlExpired(it) }
+            if (urls.isEmpty() || allExpired) {
+                playerManager.playVideo(urls, autoplay = autoplay, forceReload = true)
+                attemptStreamRecoveryForCurrentVideo()
+            } else {
+                playerManager.playVideo(urls, autoplay = autoplay)
+                if (autoplay) {
+                    startFirstFrameWatchdog(video.id)
+                }
+            }
             prefetchNextTwo(index)
         }
+    }
+
+    private fun startFirstFrameWatchdog(videoId: String) {
+        firstFrameWatchdogJob?.cancel()
+        firstFrameWatchdogJob = viewModelScope.launch {
+            delay(6_500L)
+            val state = _uiState.value
+            if (state.currentScreen == AppScreen.HOME_FEED &&
+                state.currentVideo?.id == videoId &&
+                !playerManager.hasRenderedFirstFrame.value &&
+                playerManager.playbackError.value == null
+            ) {
+                attemptStreamRecoveryForCurrentVideo()
+            }
+        }
+    }
+
+    private fun attemptStreamRecoveryForCurrentVideo(): Boolean {
+        val video = _uiState.value.currentVideo ?: return false
+        if (!refreshedStreamIds.add(video.id)) return false
+        streamRecoveryJob?.cancel()
+        streamRecoveryJob = viewModelScope.launch {
+            val fresh = repo.refreshVideoDetails(video)
+            val current = _uiState.value.currentVideo
+            if (fresh != null && current?.id == video.id) {
+                updateVideoEverywhere(fresh)
+                val quality = _uiState.value.settings.videoQuality
+                val urls = fresh.resolveCandidateUrls(quality)
+                if (urls.isNotEmpty()) {
+                    playerManager.playVideo(urls, autoplay = true, forceReload = true)
+                } else {
+                    playerManager.reportPlaybackError("Video stream unavailable — press RIGHT for next")
+                }
+            } else if (current?.id == video.id) {
+                playerManager.reportPlaybackError("Video stream unavailable — press RIGHT for next")
+            }
+        }
+        return true
+    }
+
+    fun refreshVideoThumbnail(videoId: String) {
+        if (videoId.isBlank() || !refreshedThumbnailIds.add(videoId)) return
+        val state = _uiState.value
+        val target = state.profileVideos.firstOrNull { it.id == videoId }
+            ?: state.feedVideos.firstOrNull { it.id == videoId }
+            ?: state.searchResults.firstOrNull { it.id == videoId }
+            ?: return
+        viewModelScope.launch {
+            thumbnailRefreshSemaphore.withPermit {
+                val fresh = repo.refreshVideoDetails(target) ?: return@withPermit
+                updateVideoEverywhere(fresh)
+            }
+        }
+    }
+
+    private fun updateVideoEverywhere(fresh: VideoItem) {
+        val liked = prefs.getLikedVideoIds().contains(fresh.id)
+        val saved = prefs.getSavedVideoIds().contains(fresh.id)
+        val hydratedFresh = fresh.copy(isLiked = liked, isSaved = saved)
+        _uiState.update { state ->
+            state.copy(
+                profileVideos = state.profileVideos.map { if (it.id == fresh.id) hydratedFresh else it },
+                feedVideos = state.feedVideos.map { if (it.id == fresh.id) hydratedFresh else it },
+                searchResults = state.searchResults.map { if (it.id == fresh.id) hydratedFresh else it }
+            )
+        }
+    }
+
+    private fun isCdnUrlExpired(url: String): Boolean {
+        if (url.isBlank()) return false
+        val idx = url.indexOf("x-expires=", ignoreCase = true)
+        if (idx < 0) return false
+        val start = idx + "x-expires=".length
+        val end = url.indexOf('&', start).let { if (it < 0) url.length else it }
+        val expiresSec = url.substring(start, end).toLongOrNull() ?: return false
+        if (expiresSec <= 0L) return false
+        return (System.currentTimeMillis() / 1000L) >= (expiresSec - 90L)
     }
 
     private fun prefetchNextTwo(index: Int) {
@@ -1300,6 +1443,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         profileAutoLoadJob?.cancel()
+        streamRecoveryJob?.cancel()
+        firstFrameWatchdogJob?.cancel()
         playerManager.pause()
     }
 }

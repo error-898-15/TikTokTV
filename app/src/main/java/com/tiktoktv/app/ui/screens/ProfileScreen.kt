@@ -37,6 +37,7 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -62,8 +63,10 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.tiktoktv.app.data.model.ContentRegion
 import com.tiktoktv.app.data.model.VideoItem
 import com.tiktoktv.app.ui.ProfileTab
@@ -86,7 +89,8 @@ fun ProfileScreen(
     onCycleQuality: () -> Unit,
     onSelectRegion: (ContentRegion) -> Unit,
     onClearCache: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onRefreshThumbnail: ((String) -> Unit)? = null
 ) {
     val profileSidebarFocus = remember { FocusRequester() }
     val likedSidebarFocus = remember { FocusRequester() }
@@ -406,6 +410,7 @@ fun ProfileScreen(
                                     hasMore = !uiState.isOwnProfile && uiState.profileHasMore,
                                     isLoadingMore = uiState.isProfileLoadingMore,
                                     onLoadMore = if (!uiState.isOwnProfile) onLoadMoreProfile else null,
+                                    onRefreshThumbnail = if (!uiState.isOwnProfile) onRefreshThumbnail else null,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -484,7 +489,8 @@ fun VideoFiveColumnGrid(
     modifier: Modifier = Modifier,
     hasMore: Boolean = false,
     isLoadingMore: Boolean = false,
-    onLoadMore: (() -> Unit)? = null
+    onLoadMore: (() -> Unit)? = null,
+    onRefreshThumbnail: ((String) -> Unit)? = null
 ) {
     if (videos.isEmpty()) {
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -524,7 +530,11 @@ fun VideoFiveColumnGrid(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         itemsIndexed(uniqueVideos, key = { _, item -> item.id }) { _, video ->
-            VideoGridThumbnailCard(video = video, onClick = { onVideoClick(videos.indexOfFirst { it.id == video.id }.coerceAtLeast(0)) })
+            VideoGridThumbnailCard(
+                video = video,
+                onClick = { onVideoClick(videos.indexOfFirst { it.id == video.id }.coerceAtLeast(0)) },
+                onRefreshThumbnail = onRefreshThumbnail
+            )
         }
         if (isLoadingMore || (hasMore && onLoadMore != null)) {
             item(span = { GridItemSpan(5) }, key = "__video_grid_footer__") {
@@ -563,9 +573,29 @@ fun VideoFiveColumnGrid(
 }
 
 @Composable
-private fun VideoGridThumbnailCard(video: VideoItem, onClick: () -> Unit) {
+private fun VideoGridThumbnailCard(
+    video: VideoItem,
+    onClick: () -> Unit,
+    onRefreshThumbnail: ((String) -> Unit)? = null
+) {
+    val context = LocalContext.current
     var isFocused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (isFocused) 1.07f else 1f, label = "gridCardScale")
+    val coverCandidates = remember(video.id, video.coverUrl, video.fallbackCoverUrls, video.imageUrls) {
+        video.resolveCandidateCoverUrls()
+    }
+    var coverIdx by remember(video.id, coverCandidates) { mutableIntStateOf(0) }
+    var allCoversFailed by remember(video.id, coverCandidates) { mutableStateOf(false) }
+    var refreshTriggered by remember(video.id) { mutableStateOf(false) }
+    val activeCoverUrl = coverCandidates.getOrNull(coverIdx).orEmpty()
+
+    LaunchedEffect(video.id, coverCandidates, allCoversFailed) {
+        if ((coverCandidates.isEmpty() || allCoversFailed) && !refreshTriggered) {
+            refreshTriggered = true
+            onRefreshThumbnail?.invoke(video.id)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -582,13 +612,39 @@ private fun VideoGridThumbnailCard(video: VideoItem, onClick: () -> Unit) {
             .focusable()
             .clickable { onClick() }
     ) {
-        if (video.coverUrl.isNotBlank()) {
+        if (activeCoverUrl.isNotBlank() && !allCoversFailed) {
             AsyncImage(
-                model = video.coverUrl,
+                model = ImageRequest.Builder(context)
+                    .data(activeCoverUrl)
+                    .crossfade(100)
+                    .build(),
                 contentDescription = video.caption,
                 contentScale = ContentScale.Crop,
+                onError = {
+                    if (coverIdx + 1 < coverCandidates.size) {
+                        coverIdx++
+                    } else {
+                        allCoversFailed = true
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
+        } else {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.08f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PlayArrow,
+                    contentDescription = null,
+                    tint = TikTokColors.TextMuted,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
         }
         Box(
             modifier = Modifier

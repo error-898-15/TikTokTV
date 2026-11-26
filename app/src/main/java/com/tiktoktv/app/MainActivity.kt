@@ -110,7 +110,8 @@ class MainActivity : ComponentActivity() {
                             onCycleQuality = { viewModel.cycleVideoQuality() },
                             onSelectRegion = { region -> viewModel.selectContentRegion(region) },
                             onClearCache = { viewModel.clearAllCache() },
-                            onBack = { viewModel.navigateBackToFeed() }
+                            onBack = { viewModel.navigateBackToFeed() },
+                            onRefreshThumbnail = { videoId -> viewModel.refreshVideoThumbnail(videoId) }
                         )
                         AppScreen.SEARCH -> SearchScreen(
                             uiState = uiState,

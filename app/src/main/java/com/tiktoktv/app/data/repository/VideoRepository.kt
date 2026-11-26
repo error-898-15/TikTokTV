@@ -9,6 +9,7 @@ import com.tiktoktv.app.data.model.SearchSuggestion
 import com.tiktoktv.app.data.model.UnifiedSearchResult
 import com.tiktoktv.app.data.model.UserProfileResult
 import com.tiktoktv.app.data.model.UsersPage
+import com.tiktoktv.app.data.model.VideoItem
 
 interface VideoRepository {
 
@@ -56,6 +57,8 @@ interface VideoRepository {
         cursor: String? = null,
         forceRefresh: Boolean = false
     ): Result<UserProfileResult>
+
+    suspend fun refreshVideoDetails(video: VideoItem): VideoItem? = null
 
     suspend fun getComments(
         videoId: String,

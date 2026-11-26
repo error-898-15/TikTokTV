@@ -35,6 +35,14 @@ data class WebSessionPageResponse(
     val domVideoRefs: List<Pair<String, String>> = emptyList()
 )
 
+data class WebSessionBatchResponse(
+    val rawPages: List<String>,
+    val secUid: String,
+    val userId: String,
+    val userDetailJson: String,
+    val domVideoRefs: List<Pair<String, String>> = emptyList()
+)
+
 data class WebSearchSessionResponse(
     val rawGeneralJson: String = "",
     val rawItemJson: String = "",
@@ -299,7 +307,7 @@ class TikTokWebSessionClient(
         )
 
         val shouldRetryAltUa = !hasNonEmptyItemList(firstAttempt?.rawApiJson) &&
-            (isInitialPage || firstAttempt == null || firstAttempt.domVideoRefs.isEmpty())
+            (isInitialPage || firstAttempt == null || firstAttempt.rawApiJson.isBlank())
         if (shouldRetryAltUa) {
             val altAttempt = executeFetchUserPostsLocked(
                 cleanUser = cleanUser,
@@ -322,6 +330,106 @@ class TikTokWebSessionClient(
         }
 
         return@withLock firstAttempt
+    }
+
+
+    suspend fun fetchUserPostsPagesBatch(
+        username: String,
+        secUidHint: String = "",
+        userIdHint: String = "",
+        startCursor: String = "0",
+        count: Int = ScraperConfig.PROFILE_WEB_PAGE_SIZE,
+        maxPages: Int = 3,
+        forceReload: Boolean = false,
+        regionCode: String = "BD",
+        timeZone: String = "Asia/Dhaka"
+    ): WebSessionBatchResponse? = sessionMutex.withLock {
+        val cleanUser = username.trim().removePrefix("@")
+        if (cleanUser.isBlank()) return@withLock null
+
+        val isInitialPage = startCursor == "0"
+        val preferDesktop = if (!isInitialPage && currentUsername.equals(cleanUser, ignoreCase = true)) {
+            currentUseDesktopUa
+        } else {
+            true
+        }
+
+        suspend fun runBatch(useDesktop: Boolean, reload: Boolean): WebSessionBatchResponse? {
+            val ready = ensureProfileSessionLocked(cleanUser, reload, useDesktop, regionCode)
+            if (!ready && secUidHint.isBlank()) {
+                return if (currentDomRefs.isNotEmpty() || currentUserDetailJson.isNotBlank()) {
+                    WebSessionBatchResponse(
+                        rawPages = emptyList(),
+                        secUid = currentSecUid,
+                        userId = currentUserId,
+                        userDetailJson = currentUserDetailJson,
+                        domVideoRefs = currentDomRefs
+                    )
+                } else null
+            }
+
+            val effectiveSecUid = currentSecUid.ifBlank { secUidHint }
+            val effectiveUserId = currentUserId.ifBlank { userIdHint }
+            if (effectiveSecUid.isBlank()) return null
+
+            val capturedJson = JSONObject().apply {
+                capturedPostParams.forEach { (k, v) -> put(k, v) }
+            }.toString()
+
+            val rawResult = evalAsyncJs(
+                scriptBody = buildFetchPostBatchScript(
+                    secUid = effectiveSecUid,
+                    userId = effectiveUserId,
+                    startCursor = startCursor,
+                    count = count,
+                    maxPages = maxPages.coerceIn(1, 5),
+                    capturedTemplateJson = capturedJson,
+                    fallbackSdkUrl = ScraperConfig.WEBMSSDK_FALLBACK_URL,
+                    isDesktopUa = useDesktop,
+                    allowCapturedFirstPage = !reload,
+                    regionCode = regionCode,
+                    timeZone = timeZone
+                ),
+                timeoutMs = ScraperConfig.WEB_SESSION_TIMEOUT_MS + (maxPages * 3_500L),
+                useDesktopUa = useDesktop
+            )
+            syncCookiesFromManager()
+
+            val parsed = rawResult?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
+            val pagesArr = parsed.optJSONArray("pages")
+            val rawPages = mutableListOf<String>()
+            if (pagesArr != null) {
+                for (i in 0 until pagesArr.length()) {
+                    val item = pagesArr.optString(i, "").trim()
+                    if (item.startsWith("{")) rawPages.add(item)
+                }
+            }
+            val fetchedDomRefs = parseDomRefs(parsed.optJSONArray("domRefs"))
+            val combinedDomRefs = (currentDomRefs + fetchedDomRefs).distinctBy { it.second }
+            if (combinedDomRefs.isNotEmpty()) {
+                currentDomRefs = combinedDomRefs
+            }
+            if (rawPages.isEmpty() && combinedDomRefs.isEmpty() && currentUserDetailJson.isBlank()) {
+                return null
+            }
+            return WebSessionBatchResponse(
+                rawPages = rawPages,
+                secUid = effectiveSecUid,
+                userId = effectiveUserId,
+                userDetailJson = currentUserDetailJson,
+                domVideoRefs = combinedDomRefs
+            )
+        }
+
+        val first = runBatch(preferDesktop, forceReload)
+        val hasAnyItems = first?.rawPages?.any { hasNonEmptyItemList(it) } == true
+        if (!hasAnyItems && (isInitialPage || first == null || first.rawPages.isEmpty())) {
+            val alt = runBatch(!preferDesktop, true)
+            if (alt != null && (alt.rawPages.any { hasNonEmptyItemList(it) } || alt.domVideoRefs.isNotEmpty())) {
+                return@withLock alt
+            }
+        }
+        return@withLock first
     }
 
     suspend fun searchTikTokWeb(
@@ -551,7 +659,7 @@ class TikTokWebSessionClient(
             view.loadUrl(targetUrl)
         }
 
-        withTimeoutOrNull(14_000L) { deferred.await() }
+        withTimeoutOrNull(11_000L) { deferred.await() }
         pageLoadDeferred = null
 
         var readyJson = evalAsyncJs(
@@ -564,7 +672,7 @@ class TikTokWebSessionClient(
         }.getOrDefault(true)
         // If SlardarWAF, late SPA hydration, or redirect delayed secUid, wait briefly and retry once
         if (missingSecUid) {
-            delay(1_200L)
+            delay(600L)
             val retryReadyJson = evalAsyncJs(
                 scriptBody = buildWaitForContextScript(ScraperConfig.WEBMSSDK_FALLBACK_URL, regionCode),
                 timeoutMs = 10_000L,
@@ -912,11 +1020,29 @@ class TikTokWebSessionClient(
           return out;
         };
 
+        const dismissModals = () => {
+          try {
+            const selectors = [
+              '[data-e2e="modal-close-inner-button"]',
+              'div[role="dialog"] button[aria-label="Close"]',
+              'div[role="dialog"] [data-e2e="modal-close-inner-button"]'
+            ];
+            for (const sel of selectors) {
+              document.querySelectorAll(sel).forEach(btn => { try { btn.click(); } catch (e) {} });
+            }
+            if (document.body && document.body.style && document.body.style.overflow === 'hidden') {
+              document.body.style.overflow = 'auto';
+            }
+            if (document.documentElement && document.documentElement.style && document.documentElement.style.overflow === 'hidden') {
+              document.documentElement.style.overflow = 'auto';
+            }
+          } catch (e) {}
+        };
         let sdkInjected = false;
         let result = { secUid: '', userId: '', userDetailJson: '', mssdkReady: false, domRefs: [] };
         let secUidFirstSeenAt = -1;
 
-        for (let i = 0; i < 60; i++) {
+        for (let i = 0; i < 50; i++) {
           let ds = null;
           try {
             const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
@@ -963,19 +1089,20 @@ class TikTokWebSessionClient(
             window.__TT_CAPTURED_FIRST_POST_PAGE ||
             (Array.isArray(window.__TT_CAPTURED_POST_PAGES) && window.__TT_CAPTURED_POST_PAGES.some(p => p && p.itemCount > 0))
           );
-          const waitedEnoughAfterSecUid = secUidFirstSeenAt >= 0 && (i - secUidFirstSeenAt) >= 16;
+          const waitedEnoughAfterSecUid = secUidFirstSeenAt >= 0 && (i - secUidFirstSeenAt) >= 8;
 
           if (result.secUid && (hasCapturedPage || (mssdkReady && waitedEnoughAfterSecUid))) {
             break;
           }
-          if (result.secUid && (i === 12 || i === 26) && !hasCapturedPage) {
+          if (result.secUid && (i === 6 || i === 18) && !hasCapturedPage) {
+            dismissModals();
             try {
-              window.scrollBy(0, 600);
+              window.scrollBy(0, 800);
               window.dispatchEvent(new Event('scroll'));
             } catch (e) {}
           }
 
-          if (i === 14 && !mssdkReady && !sdkInjected) {
+          if (i === 10 && !mssdkReady && !sdkInjected) {
             sdkInjected = true;
             try {
               const existingSdk = document.querySelector('script[src*="webmssdk"]');
@@ -1004,7 +1131,7 @@ class TikTokWebSessionClient(
               }
             } catch (e) {}
           }
-          await sleep(150);
+          await sleep(100);
         }
         result.domRefs = collectDomRefs();
         return result;
@@ -1022,8 +1149,98 @@ class TikTokWebSessionClient(
         regionCode: String = "BD",
         timeZone: String = "Asia/Dhaka"
     ): String = """
+        ${buildFetchPostCoreScript(
+            secUid = secUid,
+            userId = userId,
+            count = count,
+            capturedTemplateJson = capturedTemplateJson,
+            fallbackSdkUrl = fallbackSdkUrl,
+            isDesktopUa = isDesktopUa,
+            regionCode = regionCode,
+            timeZone = timeZone
+        )}
+        const res = await fetchSingleCursorPage(${JSONObject.quote(cursor)}, $allowCapturedFirstPage);
+        return { status: res.status, body: res.body || '', domRefs: collectDomRefs() };
+    """.trimIndent()
+
+    private fun buildFetchPostBatchScript(
+        secUid: String,
+        userId: String,
+        startCursor: String,
+        count: Int,
+        maxPages: Int,
+        capturedTemplateJson: String,
+        fallbackSdkUrl: String,
+        isDesktopUa: Boolean,
+        allowCapturedFirstPage: Boolean,
+        regionCode: String = "BD",
+        timeZone: String = "Asia/Dhaka"
+    ): String = """
+        ${buildFetchPostCoreScript(
+            secUid = secUid,
+            userId = userId,
+            count = count,
+            capturedTemplateJson = capturedTemplateJson,
+            fallbackSdkUrl = fallbackSdkUrl,
+            isDesktopUa = isDesktopUa,
+            regionCode = regionCode,
+            timeZone = timeZone
+        )}
+        const pages = [];
+        let nextCur = ${JSONObject.quote(startCursor)};
+        let allowFirst = $allowCapturedFirstPage;
+        for (let pIdx = 0; pIdx < $maxPages; pIdx++) {
+          const res = await fetchSingleCursorPage(nextCur, allowFirst);
+          allowFirst = false;
+          if (!res || !res.body || !isValidPostJson(res.body)) break;
+          pages.push(res.body);
+          try {
+            const parsed = JSON.parse(res.body);
+            const hasItems = Array.isArray(parsed.itemList) && parsed.itemList.length > 0;
+            const hasMore = Boolean(parsed.hasMore);
+            const nextVal = parsed.cursor !== undefined && parsed.cursor !== null ? String(parsed.cursor) : '';
+            if (!hasItems || !hasMore || !nextVal || nextVal === '0' || nextVal === nextCur) {
+              break;
+            }
+            nextCur = nextVal;
+            await sleep(60);
+          } catch (e) {
+            break;
+          }
+        }
+        return { pages, domRefs: collectDomRefs() };
+    """.trimIndent()
+
+    private fun buildFetchPostCoreScript(
+        secUid: String,
+        userId: String,
+        count: Int,
+        capturedTemplateJson: String,
+        fallbackSdkUrl: String,
+        isDesktopUa: Boolean,
+        regionCode: String,
+        timeZone: String
+    ): String = """
         $NETWORK_SNIFFER_BOOTSTRAP_JS
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const dismissModals = () => {
+          try {
+            const selectors = [
+              '[data-e2e="modal-close-inner-button"]',
+              'div[role="dialog"] button[aria-label="Close"]',
+              'div[role="dialog"] [data-e2e="modal-close-inner-button"]'
+            ];
+            for (const sel of selectors) {
+              document.querySelectorAll(sel).forEach(btn => { try { btn.click(); } catch (e) {} });
+            }
+            if (document.body && document.body.style && document.body.style.overflow === 'hidden') {
+              document.body.style.overflow = 'auto';
+            }
+            if (document.documentElement && document.documentElement.style && document.documentElement.style.overflow === 'hidden') {
+              document.documentElement.style.overflow = 'auto';
+            }
+          } catch (e) {}
+        };
         const collectDomRefs = () => {
           const out = [];
           const seen = new Set();
@@ -1065,7 +1282,6 @@ class TikTokWebSessionClient(
         };
 
         window.__TT_RETURNED_CURSORS = window.__TT_RETURNED_CURSORS || {};
-        const reqCursor = ${JSONObject.quote(cursor)};
         const pickCapturedPage = (targetCursor) => {
           const pages = Array.isArray(window.__TT_CAPTURED_POST_PAGES) ? window.__TT_CAPTURED_POST_PAGES : [];
           for (const p of pages) {
@@ -1078,36 +1294,13 @@ class TikTokWebSessionClient(
           return '';
         };
 
-        if (${allowCapturedFirstPage} && reqCursor === '0') {
-          let cap = pickCapturedPage('0');
-          if (!cap && !hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE)) {
-            for (let w = 0; w < 12; w++) {
-              cap = pickCapturedPage('0');
-              if (cap || hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE)) break;
-              await sleep(150);
-            }
-          }
-          if (!cap && hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE) && !window.__TT_RETURNED_CURSORS['first']) {
-            window.__TT_RETURNED_CURSORS['first'] = true;
-            cap = window.__TT_CAPTURED_FIRST_POST_PAGE;
-          }
-          if (cap) {
-            return { status: 200, body: cap, domRefs: collectDomRefs() };
-          }
-        } else if (reqCursor !== '0') {
-          const alreadyCaptured = pickCapturedPage(reqCursor);
-          if (alreadyCaptured) {
-            return { status: 200, body: alreadyCaptured, domRefs: collectDomRefs() };
-          }
-        }
-
         const ensureSigner = async () => {
-          for (let i = 0; i < 20; i++) {
+          for (let i = 0; i < 16; i++) {
             const ac = window.byted_acrawler;
             if (window.MSSDK_INITIALIZED || (ac && (typeof ac.frontierSign === 'function' || typeof ac.sign === 'function'))) {
               return true;
             }
-            if (i === 10 && !document.querySelector('script[data-tv-mssdk="1"]') && !window.byted_acrawler) {
+            if (i === 6 && !document.querySelector('script[data-tv-mssdk="1"]') && !window.byted_acrawler) {
               try {
                 const existingSdk = document.querySelector('script[src*="webmssdk"]');
                 const s = document.createElement('script');
@@ -1132,11 +1325,10 @@ class TikTokWebSessionClient(
                 document.head.appendChild(s);
               } catch (e) {}
             }
-            await sleep(150);
+            await sleep(100);
           }
           return false;
         };
-        await ensureSigner();
 
         let ds = {};
         try {
@@ -1147,10 +1339,10 @@ class TikTokWebSessionClient(
         } catch (e) {}
         const appCtx = ds['webapp.app-context'] || {};
         const bizCtx = ds['webapp.biz-context'] || {};
-        const verifyMatch = document.cookie.match(/(?:^|;\s*)s_v_web_id=([^;]+)/);
-        const msTokenMatch = document.cookie.match(/(?:^|;\s*)msToken=([^;]+)/);
 
-        const buildParams = (platformOverride) => {
+        const buildParams = (reqCursor, platformOverride) => {
+          const verifyMatch = document.cookie.match(/(?:^|;\s*)s_v_web_id=([^;]+)/);
+          const msTokenMatch = document.cookie.match(/(?:^|;\s*)msToken=([^;]+)/);
           const params = new URLSearchParams();
           const defaults = {
             WebIdLastTime: String(appCtx.webIdCreatedTime || Math.floor(Date.now() / 1000)),
@@ -1164,7 +1356,7 @@ class TikTokWebSessionClient(
             browser_version: String(navigator.appVersion || '5.0'),
             channel: 'tiktok_web',
             cookie_enabled: String(navigator.cookieEnabled),
-            coverFormat: String((bizCtx.videoCoverSettings && bizCtx.videoCoverSettings.format) || '2'),
+            coverFormat: '2',
             data_collection_enabled: 'true',
             device_id: String(appCtx.wid || ''),
             device_platform: platformOverride || ${if (isDesktopUa) "'web_pc'" else "'web_mobile'"},
@@ -1226,41 +1418,19 @@ class TikTokWebSessionClient(
           params.delete('_signature');
           params.delete('type');
           params.set('secUid', ${JSONObject.quote(secUid)});
-          if (${JSONObject.quote(userId)}) {
-            params.set('userId', ${JSONObject.quote(userId)});
-          }
           params.set('count', String($count));
-          params.set('cursor', ${JSONObject.quote(cursor)});
+          params.set('cursor', String(reqCursor));
           return params;
         };
 
-        const tryCreatorList = async () => {
-          try {
-            const cParams = new URLSearchParams({
-              aid: '1988',
-              secUid: ${JSONObject.quote(secUid)},
-              count: String(Math.min(15, Math.max(1, $count))),
-              cursor: ${JSONObject.quote(cursor)},
-              type: '1'
-            });
-            const cUrl = 'https://www.tiktok.com/api/creator/item_list/?' + cParams.toString();
-            const resp = await window.fetch(cUrl, {
-              method: 'GET',
-              credentials: 'include'
-            });
-            const txt = await resp.text();
-            if (hasItemsInJson(txt)) {
-              return { status: resp.status, body: txt };
-            }
-          } catch (e) {}
-          return null;
-        };
-
         const baseUrl = 'https://www.tiktok.com/api/post/item_list/';
-        const tryFetch = async (qs, useRelative = false) => {
+        const tryFetch = async (qs, useRelative = false, useNative = false) => {
           try {
             const prefix = useRelative ? '/api/post/item_list/?' : (baseUrl + '?');
-            const resp = await window.fetch(prefix + qs, {
+            const fetchFn = (useNative && typeof window.__TT_ORIG_FETCH === 'function')
+              ? window.__TT_ORIG_FETCH
+              : window.fetch;
+            const resp = await fetchFn(prefix + qs, {
               method: 'GET',
               credentials: 'include'
             });
@@ -1331,28 +1501,50 @@ class TikTokWebSessionClient(
           return null;
         };
 
-        const fetchAttempt = async (platformOverride) => {
-          const qs = buildParams(platformOverride).toString();
-          let r = await tryFetch(qs, false);
-          if (hasItemsInJson(r.body)) return r;
+        const tryCreatorList = async (reqCursor) => {
+          try {
+            const cParams = new URLSearchParams({
+              aid: '1988',
+              secUid: ${JSONObject.quote(secUid)},
+              count: String(Math.min(30, Math.max(1, $count))),
+              cursor: String(reqCursor),
+              type: '1'
+            });
+            const cUrl = 'https://www.tiktok.com/api/creator/item_list/?' + cParams.toString();
+            const resp = await window.fetch(cUrl, {
+              method: 'GET',
+              credentials: 'include'
+            });
+            const txt = await resp.text();
+            if (hasItemsInJson(txt)) {
+              return { status: resp.status, body: txt };
+            }
+          } catch (e) {}
+          return null;
+        };
 
-          const rRel = await tryFetch(qs, true);
-          if (hasItemsInJson(rRel.body)) return rRel;
-          if (!isValidPostJson(r.body) && isValidPostJson(rRel.body)) r = rRel;
+        const fetchAttempt = async (reqCursor, platformOverride) => {
+          const qs = buildParams(reqCursor, platformOverride).toString();
+          let r = await tryFetch(qs, false, false);
+          if (hasItemsInJson(r.body)) return r;
 
           const signedQs = await signWithFrontier(qs);
           if (signedQs) {
+            const rNative = await tryFetch(signedQs, false, true);
+            if (hasItemsInJson(rNative.body)) return rNative;
+            if (!isValidPostJson(r.body) && isValidPostJson(rNative.body)) r = rNative;
+
             const rSignedXhr = await tryXhr(signedQs, false);
             if (hasItemsInJson(rSignedXhr.body)) return rSignedXhr;
             if (!isValidPostJson(r.body) && isValidPostJson(rSignedXhr.body)) r = rSignedXhr;
-
-            const rSignedFetch = await tryFetch(signedQs, false);
-            if (hasItemsInJson(rSignedFetch.body)) return rSignedFetch;
-            if (!isValidPostJson(r.body) && isValidPostJson(rSignedFetch.body)) r = rSignedFetch;
           }
 
+          const rRel = await tryFetch(qs, true, false);
+          if (hasItemsInJson(rRel.body)) return rRel;
+          if (!isValidPostJson(r.body) && isValidPostJson(rRel.body)) r = rRel;
+
           if (!hasItemsInJson(r.body)) {
-            await sleep(250);
+            await sleep(150);
             const rXhr = await tryXhr(qs, true);
             if (hasItemsInJson(rXhr.body) || (!isValidPostJson(r.body) && isValidPostJson(rXhr.body))) {
               r = rXhr;
@@ -1361,52 +1553,88 @@ class TikTokWebSessionClient(
           return r;
         };
 
-        let res = await fetchAttempt(null);
-        if (!hasItemsInJson(res.body)) {
-          const altPlatform = ${if (isDesktopUa) "'web_mobile'" else "'web_pc'"};
-          const altRes = await fetchAttempt(altPlatform);
-          if (hasItemsInJson(altRes.body) || (!isValidPostJson(res.body) && isValidPostJson(altRes.body))) {
-            res = altRes;
-          }
-        }
-
-        if (!hasItemsInJson(res.body)) {
-          try {
-            const pagesBefore = Array.isArray(window.__TT_CAPTURED_POST_PAGES) ? window.__TT_CAPTURED_POST_PAGES.length : 0;
-            for (let step = 0; step < 3; step++) {
-              const scrollTarget = Math.max(document.body ? document.body.scrollHeight : 0, document.documentElement ? document.documentElement.scrollHeight : 0, (step + 1) * 1600);
-              window.scrollTo(0, scrollTarget);
-              window.dispatchEvent(new Event('scroll'));
+        const fetchSingleCursorPage = async (reqCursor, allowFirstCap) => {
+          if (allowFirstCap && reqCursor === '0') {
+            let cap = pickCapturedPage('0');
+            if (!cap && !hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE)) {
               for (let w = 0; w < 8; w++) {
-                await sleep(160);
-                const pages = Array.isArray(window.__TT_CAPTURED_POST_PAGES) ? window.__TT_CAPTURED_POST_PAGES : [];
-                let matched = null;
-                for (let idx = pages.length - 1; idx >= 0; idx--) {
-                  const p = pages[idx];
-                  if (p && hasItemsInJson(p.body) && !window.__TT_RETURNED_CURSORS['body_' + p.key] && (idx >= pagesBefore || p.reqCursor === reqCursor)) {
-                    matched = p;
+                cap = pickCapturedPage('0');
+                if (cap || hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE)) break;
+                await sleep(100);
+              }
+            }
+            if (!cap && hasItemsInJson(window.__TT_CAPTURED_FIRST_POST_PAGE) && !window.__TT_RETURNED_CURSORS['first']) {
+              window.__TT_RETURNED_CURSORS['first'] = true;
+              cap = window.__TT_CAPTURED_FIRST_POST_PAGE;
+            }
+            if (cap) {
+              return { status: 200, body: cap };
+            }
+          } else if (reqCursor !== '0') {
+            const alreadyCaptured = pickCapturedPage(reqCursor);
+            if (alreadyCaptured) {
+              return { status: 200, body: alreadyCaptured };
+            }
+          }
+
+          await ensureSigner();
+
+          let res = await fetchAttempt(reqCursor, null);
+          if (!hasItemsInJson(res.body)) {
+            const altPlatform = ${if (isDesktopUa) "'web_mobile'" else "'web_pc'"};
+            const altRes = await fetchAttempt(reqCursor, altPlatform);
+            if (hasItemsInJson(altRes.body) || (!isValidPostJson(res.body) && isValidPostJson(altRes.body))) {
+              res = altRes;
+            }
+          }
+
+          if (!hasItemsInJson(res.body)) {
+            try {
+              dismissModals();
+              const pagesBefore = Array.isArray(window.__TT_CAPTURED_POST_PAGES) ? window.__TT_CAPTURED_POST_PAGES.length : 0;
+              for (let step = 0; step < 5; step++) {
+                const links = document.querySelectorAll('a[href*="/video/"], a[href*="/photo/"]');
+                if (links && links.length > 0) {
+                  try { links[links.length - 1].scrollIntoView({ behavior: 'instant', block: 'end' }); } catch (e) {}
+                }
+                const scrollTarget = Math.max(
+                  document.body ? document.body.scrollHeight : 0,
+                  document.documentElement ? document.documentElement.scrollHeight : 0,
+                  (step + 1) * 1800
+                );
+                window.scrollTo(0, scrollTarget);
+                if (document.documentElement) document.documentElement.scrollTop = scrollTarget;
+                window.dispatchEvent(new Event('scroll'));
+                for (let w = 0; w < 7; w++) {
+                  await sleep(120);
+                  const pages = Array.isArray(window.__TT_CAPTURED_POST_PAGES) ? window.__TT_CAPTURED_POST_PAGES : [];
+                  let matched = null;
+                  for (let idx = pages.length - 1; idx >= 0; idx--) {
+                    const p = pages[idx];
+                    if (p && hasItemsInJson(p.body) && !window.__TT_RETURNED_CURSORS['body_' + p.key] && (idx >= pagesBefore || p.reqCursor === reqCursor)) {
+                      matched = p;
+                      break;
+                    }
+                  }
+                  if (matched) {
+                    window.__TT_RETURNED_CURSORS['body_' + matched.key] = true;
+                    res = { status: 200, body: matched.body };
                     break;
                   }
                 }
-                if (matched) {
-                  window.__TT_RETURNED_CURSORS['body_' + matched.key] = true;
-                  res = { status: 200, body: matched.body };
-                  break;
-                }
+                if (hasItemsInJson(res.body)) break;
               }
-              if (hasItemsInJson(res.body)) break;
-            }
-          } catch (e) {}
-        }
-
-        if (!hasItemsInJson(res.body)) {
-          const creatorRes = await tryCreatorList();
-          if (creatorRes && hasItemsInJson(creatorRes.body)) {
-            res = creatorRes;
+            } catch (e) {}
           }
-        }
 
-        return { status: res.status, body: res.body || '', domRefs: collectDomRefs() };
+          if (!hasItemsInJson(res.body)) {
+            const creatorRes = await tryCreatorList(reqCursor);
+            if (creatorRes && hasItemsInJson(creatorRes.body)) {
+              res = creatorRes;
+            }
+          }
+          return res;
+        };
     """.trimIndent()
 
     private companion object {
@@ -1499,7 +1727,10 @@ class TikTokWebSessionClient(
               };
 
               try {
-                const origFetch = window.fetch;
+                const origFetch = window.__TT_ORIG_FETCH || window.fetch;
+                if (!window.__TT_ORIG_FETCH && typeof origFetch === 'function') {
+                  window.__TT_ORIG_FETCH = origFetch;
+                }
                 if (typeof origFetch === 'function') {
                   window.fetch = function(input, init) {
                     const url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');

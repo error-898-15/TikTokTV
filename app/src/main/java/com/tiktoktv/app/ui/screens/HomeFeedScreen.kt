@@ -49,8 +49,10 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import coil.request.ImageRequest
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
@@ -126,15 +128,21 @@ fun HomeFeedScreen(
             )
         }
         else -> {
+            val context = LocalContext.current
             val video = uiState.currentVideo ?: return
             var slideIndex by remember(video.id) { mutableIntStateOf(0) }
             var isSlidePaused by remember(video.id) { mutableStateOf(!uiState.settings.autoplay) }
+            val coverCandidates = remember(video.id, video.coverUrl, video.fallbackCoverUrls, video.imageUrls) {
+                video.resolveCandidateCoverUrls()
+            }
+            var coverIdx by remember(video.id, coverCandidates) { mutableIntStateOf(0) }
+            val resolvedCoverUrl = coverCandidates.getOrNull(coverIdx).orEmpty()
             val activeSlideUrl = if (video.isPhotoPost) {
                 video.imageUrls.getOrElse(slideIndex.coerceIn(0, (video.imageUrls.size - 1).coerceAtLeast(0))) {
-                    video.coverUrl
+                    resolvedCoverUrl
                 }
             } else {
-                video.coverUrl
+                resolvedCoverUrl
             }
 
             LaunchedEffect(video.id, isSlidePaused, video.imageUrls.size) {
@@ -251,11 +259,19 @@ fun HomeFeedScreen(
                             }
                         } else {
                             // Show crisp video cover behind PlayerView until first video frame renders
-                            if (!hasRenderedFirstFrame && video.coverUrl.isNotBlank()) {
+                            if (!hasRenderedFirstFrame && resolvedCoverUrl.isNotBlank()) {
                                 AsyncImage(
-                                    model = video.coverUrl,
+                                    model = ImageRequest.Builder(context)
+                                        .data(resolvedCoverUrl)
+                                        .crossfade(false)
+                                        .build(),
                                     contentDescription = video.caption,
                                     contentScale = ContentScale.Fit,
+                                    onError = {
+                                        if (coverIdx + 1 < coverCandidates.size) {
+                                            coverIdx++
+                                        }
+                                    },
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }

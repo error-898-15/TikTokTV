@@ -64,6 +64,7 @@ class VideoPlayerManager(
     private var currentAutoplay = true
     private var currentVideoUrl: String = ""
     var onVideoEndedCallback: (() -> Unit)? = null
+    var onAllCandidatesFailedCallback: ((failedUrl: String) -> Boolean)? = null
 
     init {
         mainPlayer.addListener(object : Player.Listener {
@@ -74,6 +75,7 @@ class VideoPlayerManager(
             override fun onRenderedFirstFrame() {
                 _hasRenderedFirstFrame.value = true
                 _playbackError.value = null
+                _isBuffering.value = false
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -89,15 +91,21 @@ class VideoPlayerManager(
                     candidateIndex = nextIndex
                     prepareUrl(candidateUrls[nextIndex], currentAutoplay)
                 } else {
-                    _isBuffering.value = false
-                    _playbackError.value = error.message ?: "Playback error"
+                    val recoveryStarted = onAllCandidatesFailedCallback?.invoke(currentVideoUrl) == true
+                    if (recoveryStarted) {
+                        _isBuffering.value = true
+                        _playbackError.value = null
+                    } else {
+                        _isBuffering.value = false
+                        _playbackError.value = error.message ?: "Playback error"
+                    }
                 }
             }
         })
     }
 
     fun playVideo(url: String, autoplay: Boolean) {
-        playVideo(listOf(url), autoplay)
+        playVideo(listOf(url), autoplay, forceReload = false)
     }
 
     fun playPhotoAudio(audioUrl: String, autoplay: Boolean) {
@@ -107,7 +115,7 @@ class VideoPlayerManager(
             return
         }
         mainPlayer.repeatMode = Player.REPEAT_MODE_ONE
-        playVideoInternal(listOf(clean), autoplay)
+        playVideoInternal(listOf(clean), autoplay, forceReload = false)
     }
 
     fun clearForPhotoPost() {
@@ -121,22 +129,39 @@ class VideoPlayerManager(
         mainPlayer.clearMediaItems()
     }
 
-    fun playVideo(urls: List<String>, autoplay: Boolean) {
+    fun playVideo(urls: List<String>, autoplay: Boolean, forceReload: Boolean = false) {
         mainPlayer.repeatMode = if (autoScrollEnabled) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
-        playVideoInternal(urls, autoplay)
+        playVideoInternal(urls, autoplay, forceReload)
     }
 
-    private fun playVideoInternal(urls: List<String>, autoplay: Boolean) {
+    fun reportPlaybackError(message: String) {
+        _isBuffering.value = false
+        _playbackError.value = message
+    }
+
+    private fun playVideoInternal(urls: List<String>, autoplay: Boolean, forceReload: Boolean) {
         val cleanUrls = urls.map { it.trim() }
             .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
             .distinct()
-        if (cleanUrls.isEmpty()) return
+        if (cleanUrls.isEmpty()) {
+            val recoveryStarted = onAllCandidatesFailedCallback?.invoke("") == true
+            if (!recoveryStarted) {
+                _isBuffering.value = false
+                _playbackError.value = "Video stream unavailable"
+            }
+            return
+        }
 
         val primary = cleanUrls.first()
-        if (currentVideoUrl == primary &&
+        if (!forceReload &&
+            currentVideoUrl == primary &&
             mainPlayer.playbackState != Player.STATE_IDLE &&
-            _playbackError.value == null
+            _playbackError.value == null &&
+            _hasRenderedFirstFrame.value
         ) {
+            if (mainPlayer.playbackState == Player.STATE_ENDED) {
+                mainPlayer.seekTo(0L)
+            }
             if (autoplay && !mainPlayer.isPlaying) {
                 mainPlayer.play()
             }
@@ -147,6 +172,7 @@ class VideoPlayerManager(
         candidateIndex = 0
         currentAutoplay = autoplay
         _playbackError.value = null
+        _isBuffering.value = true
         prepareUrl(primary, autoplay)
     }
 

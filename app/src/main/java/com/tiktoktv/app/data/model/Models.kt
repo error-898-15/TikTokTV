@@ -66,15 +66,29 @@ data class VideoItem(
     val isLiked: Boolean = false,
     val isSaved: Boolean = false,
     val imageUrls: List<String> = emptyList(),
-    val audioUrl: String = ""
+    val audioUrl: String = "",
+    val fallbackCoverUrls: List<String> = emptyList(),
+    val fallbackVideoUrls: List<String> = emptyList()
 ) {
     val isPhotoPost: Boolean
         get() = imageUrls.isNotEmpty()
 
+    fun resolveCandidateCoverUrls(): List<String> {
+        val all = (listOf(coverUrl) + fallbackCoverUrls + imageUrls)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .distinct()
+        val standard = all.filterNot {
+            val lower = it.lowercase()
+            lower.contains(".heic") || lower.contains(".avif") || lower.contains("format=heic")
+        }
+        return (standard + all).distinct()
+    }
+
     fun resolveUrlForQuality(quality: VideoQuality): String = when (quality) {
-        VideoQuality.AUTO -> videoUrl.ifBlank { audioUrl }
-        VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }.ifBlank { audioUrl }
-        VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }.ifBlank { audioUrl }
+        VideoQuality.AUTO -> videoUrl.ifBlank { fallbackVideoUrls.firstOrNull().orEmpty() }.ifBlank { audioUrl }
+        VideoQuality.HD_1080, VideoQuality.HD_720 -> hdVideoUrl.ifBlank { videoUrl }.ifBlank { fallbackVideoUrls.firstOrNull().orEmpty() }.ifBlank { audioUrl }
+        VideoQuality.SD_480 -> sdVideoUrl.ifBlank { videoUrl }.ifBlank { fallbackVideoUrls.firstOrNull().orEmpty() }.ifBlank { audioUrl }
     }
 
     fun resolveCandidateUrls(quality: VideoQuality): List<String> {
@@ -85,7 +99,7 @@ data class VideoItem(
                 .distinct()
         }
         val primary = resolveUrlForQuality(quality)
-        return listOf(primary, videoUrl, sdVideoUrl, hdVideoUrl)
+        return (listOf(primary, videoUrl, sdVideoUrl, hdVideoUrl) + fallbackVideoUrls)
             .map { it.trim() }
             .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
             .distinct()

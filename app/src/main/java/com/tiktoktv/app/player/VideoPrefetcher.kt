@@ -32,11 +32,17 @@ class VideoPrefetcher(
 
     val simpleCache: SimpleCache = SimpleCache(cacheDir, evictor, databaseProvider)
 
-    private val upstreamFactory = OkHttpDataSource.Factory(okHttpClient)
-        .setUserAgent(ScraperConfig.HEADER_MOBILE_USER_AGENT_VALUE)
+    private val playbackClient = okHttpClient.newBuilder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    private val upstreamFactory = OkHttpDataSource.Factory(playbackClient)
+        .setUserAgent(ScraperConfig.HEADER_USER_AGENT_VALUE)
         .setDefaultRequestProperties(
             mapOf(
-                ScraperConfig.HEADER_REFERER_KEY to ScraperConfig.HEADER_REFERER_VALUE
+                ScraperConfig.HEADER_REFERER_KEY to ScraperConfig.HEADER_REFERER_VALUE,
+                "Origin" to ScraperConfig.TIKTOK_WEB_BASE
             )
         )
 
